@@ -36,6 +36,17 @@ IDLE → POSSIVEL_DEFECACAO → DEFECANDO → AGUARDANDO_CONFIRMACAO → DEFECAC
 - **Frigate**: Video surveillance system with object detection
 - **MQTT Broker**: For receiving events from Frigate and publishing status updates
 - **Python 3.11+** or Docker
+- **FFmpeg**: Required for video processing (install with `apt install ffmpeg` on Ubuntu/Debian, `brew install ffmpeg` on macOS)
+
+## Dataset Processing
+
+For preparing video datasets for model training, use the included dataset processing script:
+
+```bash
+./scripts/process_dataset.sh
+```
+
+This interactive script normalizes video files (resolution, frame rate, format) and extracts metadata for machine learning workflows. See `scripts/process_dataset_readme.md` for detailed usage instructions.
 
 ## Quick Start with Docker
 
