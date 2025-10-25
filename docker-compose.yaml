@@ -1,6 +1,6 @@
 services:
   ellie-watcher:
-    build: ./ellie-watcher
+    build: .
     container_name: ellie-watcher
     restart: unless-stopped
     environment:
@@ -28,6 +28,10 @@ services:
       resources:
         limits:
           memory: 1g
+    volumes:
+      - /config/ellie-watcher/.env:/app/.env
+      - /config/ellie-watcher/logs:/app/logs
+    network_mode: host
     # isolate load; optional
     # cpus: 1.0
     # cpu_shares: 128
