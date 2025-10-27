@@ -259,12 +259,6 @@ def residue_blob(bg_roi, cur_roi):
 
 # ---------- MQTT HANDLERS ----------
 
-# MQTT client setup
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-
-if MQTT_USER:
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
-
 def on_connect(c, userdata, flags, rc, properties=None):
     """
     MQTT connection callback. Subscribes to Frigate events topic.
@@ -424,9 +418,19 @@ def monitor_pooppresent():
             mqtt_publish(client, TOPIC_STATE, "IDLE")
             return
 
+# ---------- MQTT bootstrap (compat paho v1/v2) ----------
+try:
+    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+except AttributeError:
+    client = mqtt.Client()
+
+if MQTT_USER:
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+
 client.on_connect = on_connect
 client.on_message = on_message
-client.connect(MQTT_HOST, MQTT_PORT, 60)
+
+client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
 client.loop_start()
 
 print("[ellie-watcher] running with:")
