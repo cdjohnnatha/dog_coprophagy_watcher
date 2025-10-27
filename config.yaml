@@ -1,0 +1,52 @@
+name: Ellie Watcher
+version: "1.0.0"
+slug: ellie-watcher
+description: Heurística de detecção (poop/coprofagia) integrada ao Frigate/MQTT.
+arch:
+  - aarch64
+  - armv7
+  - amd64
+startup: services
+boot: auto
+init: false
+homeassistant_api: false
+host_network: true
+privileged:
+  - SYS_ADMIN
+map:
+  - config:rw
+options:
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_user: "mqtt_user"
+  mqtt_pass: "MQQTEllie2025!"
+  mqtt_prefix: "frigate"
+
+  frigate_base_url: "http://frigate:5000"
+  camera_name: "ellie"
+  toilet_zone: "toilet_zone"
+
+  squat_score_thresh: 0.65
+  squat_min_duration_s: 5.0
+  residue_confirm_window_s: 20
+  residue_min_area: 140
+  residue_static_sec: 2.0
+  snapshot_fps: 4
+  check_interval_s: 15
+
+schema:
+  mqtt_host: str
+  mqtt_port: int
+  mqtt_user: str
+  mqtt_pass: str
+  mqtt_prefix: str
+  frigate_base_url: str
+  camera_name: str
+  toilet_zone: str
+  squat_score_thresh: float
+  squat_min_duration_s: float
+  residue_confirm_window_s: float
+  residue_min_area: int
+  residue_static_sec: float
+  snapshot_fps: int
+  check_interval_s: int
