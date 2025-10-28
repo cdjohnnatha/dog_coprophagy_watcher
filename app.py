@@ -28,6 +28,8 @@ CHECK_INT_S = float(os.getenv("CHECK_INTERVAL_S", "15"))
 TOPIC_EVENTS = f"{MQTT_PREFIX}/events"
 TOPIC_STATE  = "home/ellie/state"
 TOPIC_POOP   = "home/ellie/poop_present"
+TOPIC_POOP_EVENT = "home/ellie/poop_event"
+FR_PUBLIC   = os.getenv("FR_PUBLIC", os.getenv("FRIGATE_PUBLIC_URL", "http://frigate:5000"))
 
 # ---------- HELPERS ----------
 
@@ -70,6 +72,28 @@ def fetch_snapshot():
     arr = np.frombuffer(r.content, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return img
+
+def find_recent_poop_event_id(ts_confirm: float) -> str | None:
+    """
+    Find the recent poop event in Frigate with clip, near ts_confirm.
+    Window: -30s .. +6min.
+    Return event id or None.
+    """
+    try:
+        after  = int(ts_confirm - 30)
+        before = int(ts_confirm + 360)  # ajuste se quiser
+        url = (f"{FR_URL}/api/events"
+               f"?camera={CAM}&label=poop&has_clip=1"
+               f"&after={after}&before={before}&limit=5")
+        r = requests.get(url, timeout=3.0)
+        r.raise_for_status()
+        items = r.json() if isinstance(r.json(), list) else []
+        if not items:
+            return None
+        items.sort(key=lambda e: abs(ts_confirm - float(e.get("start_time", 0))))
+        return items[0].get("id")
+    except Exception:
+        return None
 
 @dataclass
 class TrackState:
@@ -376,6 +400,21 @@ def confirm_residue_window():
                     "area": int(best_area),
                     "ts": now_iso(),
                 })
+                # Link confirmation to Frigate event/clip and publish a single package
+                evt_id = find_recent_poop_event_id(time.time())
+                payload = {
+                    "ts": now_iso(),
+                    "camera": CAM,
+                    "zone": ZONE,
+                    "event_id": evt_id,
+                }
+                if evt_id:
+                    base_api = f"{FR_PUBLIC}/api/events/{evt_id}"
+                    payload["clip_url"]  = f"{base_api}/clip.mp4"
+                    payload["thumb_url"] = f"{base_api}/thumbnail.jpg"
+                    payload["snapshot"]  = f"{base_api}/snapshot.jpg"
+
+                mqtt_publish(client, TOPIC_POOP_EVENT, payload)
                 # start monitor to turn off when it disappears
                 threading.Thread(target=monitor_pooppresent, args=()).start()
                 return
