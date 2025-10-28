@@ -95,6 +95,35 @@ def find_recent_poop_event_id(ts_confirm: float) -> str | None:
     except Exception:
         return None
 
+def frigate_create_event(camera: str, label: str, sub_label: str | None = None) -> str | None:
+    """
+    Creates a manual event in Frigate and returns the event_id.
+    Note: the Frigate API exposes POST /api/events {camera,label,sub_label?}.
+    """
+    try:
+        url = f"{FR_URL}/api/events"
+        payload = {"camera": camera, "label": label}
+        if sub_label:
+            payload["sub_label"] = sub_label
+        r = requests.post(url, json=payload, timeout=3.0)
+        r.raise_for_status()
+        # recent responses return {"id": "..."}; if not, try alternative key
+        data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
+        return data.get("id") or data.get("event_id")
+    except Exception as e:
+        print(f"[frigate] error creating event: {e}")
+        return None
+
+
+def frigate_event_urls(event_id: str) -> tuple[str, str]:
+    """
+    Builds common Frigate URLs for event clip/thumbnail.
+    (Some versions generate the clip on demand when accessed)
+    """
+    clip  = f"{FR_URL}/api/events/{event_id}/clip.mp4"
+    thumb = f"{FR_URL}/api/events/{event_id}/thumbnail.jpg"
+    return clip, thumb
+
 @dataclass
 class TrackState:
     """
@@ -415,6 +444,23 @@ def confirm_residue_window():
                     payload["snapshot"]  = f"{base_api}/snapshot.jpg"
 
                 mqtt_publish(client, TOPIC_POOP_EVENT, payload)
+                # --- NEW: create event in Frigate + publish enriched event ---
+                event_id = frigate_create_event(CAM, label="poop_confirmed", sub_label="watcher:auto")
+                clip_url, thumb_url = ("", "")
+                if event_id:
+                    clip_url, thumb_url = frigate_event_urls(event_id)
+
+                # publish a "event record" for the UI/automations
+                mqtt_publish(client, TOPIC_POOP_EVENT, {
+                    "ts": now_iso(),
+                    "camera": CAM,
+                    "zone": ZONE,
+                    "event_id": event_id or "",
+                    "clip_url": clip_url,
+                    "thumb_url": thumb_url,
+                    "centroid": [int(best_centroid[0]), int(best_centroid[1])],
+                    "area": int(best_area)
+                })
                 # start monitor to turn off when it disappears
                 threading.Thread(target=monitor_pooppresent, args=()).start()
                 return
