@@ -1,5 +1,5 @@
 name: Ellie Watcher
-version: "1.0.0"
+version: "1.1.2"
 slug: ellie-watcher
 description: Heurística de detecção (poop/coprofagia) integrada ao Frigate/MQTT.
 arch:
@@ -22,17 +22,18 @@ options:
   mqtt_pass: "MQQTEllie2025!"
   mqtt_prefix: "frigate"
 
-  frigate_base_url: "http://frigate:5000"
+  frigate_base_url: "http://ccab4aaf-frigate:5000"
   camera_name: "ellie"
   toilet_zone: "toilet_zone"
 
-  squat_score_thresh: 0.65
-  squat_min_duration_s: 5.0
-  residue_confirm_window_s: 20
-  residue_min_area: 140
-  residue_static_sec: 2.0
+  squat_score_thresh: 0.58
+  squat_min_duration_s: 7
+  residue_confirm_window_s: 45
+  residue_min_area: 80
+  residue_static_sec: 1.5
   snapshot_fps: 4
   check_interval_s: 15
+  enable_debug_watcher: false
 
 schema:
   mqtt_host: str
@@ -50,3 +51,4 @@ schema:
   residue_static_sec: float
   snapshot_fps: int
   check_interval_s: int
+  enable_debug_watcher: bool
