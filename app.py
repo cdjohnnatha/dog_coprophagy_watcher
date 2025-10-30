@@ -33,6 +33,22 @@ TOPIC_POOP   = "home/ellie/poop_present"
 TOPIC_POOP_EVENT = "home/ellie/poop_event"
 FR_PUBLIC   = os.getenv("FR_PUBLIC", os.getenv("FRIGATE_PUBLIC_URL", "http://frigate:5000"))
 
+# --- EPISÓDIO / DEDUP ---
+EP_COOLDOWN_S   = float(os.getenv("EP_COOLDOWN_S", "180"))  # mesclar "cocô partido" num só
+LEAVE_TIMEOUT_S = float(os.getenv("LEAVE_TIMEOUT_S", "8"))  # cão precisa "sumir" X s p/ fechar episódio
+MERGE_RADIUS_PX = int(os.getenv("MERGE_RADIUS_PX", "90"))   # distância p/ considerar o mesmo evento
+
+# --- ANTI-PEE / SHAPE ---
+MIN_BLOB_W      = int(os.getenv("MIN_BLOB_W", "14"))
+MIN_BLOB_H      = int(os.getenv("MIN_BLOB_H", "14"))
+MIN_CIRCULARITY = float(os.getenv("MIN_CIRCULARITY", "0.28"))  # 4πA/P²
+MIN_SOLIDITY    = float(os.getenv("MIN_SOLIDITY", "0.65"))     # A/convexHull
+HSV_S_MIN       = int(os.getenv("HSV_S_MIN", "25"))            # saturação mínima (poça molhada costuma ser baixa)
+
+# --- PARADO DE VERDADE ---
+MOTIONLESS_MIN   = int(os.getenv("MOTIONLESS_MIN", "3"))
+SPEED_MAX_STILL  = float(os.getenv("SPEED_MAX_STILL", "0.15"))
+
 # ---------- DEBUG / LOGGER ----------
 def log(*args, mqtt_debug=True):
     if not ENABLE_DEBUG_WATCHER:
@@ -124,8 +140,13 @@ class TrackState:
     poop_roi: tuple | None = None
     poop_centroid: tuple | None = None
     residue_bg: np.ndarray | None = None      # baseline capturada DENTRO da janela de confirmação
+    episode_active: bool = False
+    episode_started_ts: float = 0.0
+    last_confirm_ts: float = 0.0
+    last_confirm_centroid: tuple | None = None
 
 state = TrackState()
+last_seen_dog_ts = 0.0  # global simples p/ saber quando "sumiu"
 
 # ---------- MQTT ----------
 def on_connect(c, userdata, flags, rc, properties=None):
@@ -134,6 +155,7 @@ def on_connect(c, userdata, flags, rc, properties=None):
     mqtt_publish(c, "home/ellie/health", {"ok": True, "ts": now_iso(), "camera": CAM, "zone": ZONE})
 
 def on_message(client, _userdata, msg):
+    global last_seen_dog_ts
     try:
         data = json.loads(msg.payload.decode("utf-8"))
     except Exception:
@@ -157,19 +179,26 @@ def on_message(client, _userdata, msg):
     if not box:
         return
 
-    # score
+    # score (parado de verdade)
     ratio = float(after.get("ratio", 1.0))
     stationary = bool(after.get("stationary", False))
     speed = float(after.get("current_estimated_speed", 0.0))
     motionless = int(after.get("motionless_count", 0))
+
     ratio_term = max(0.0, min(1.0, (0.70 - ratio) / 0.20))
-    stationary_term = 1.0 if stationary or motionless >= 1 else 0.0
-    speed_term = max(0.0, min(1.0, 1.0 - min(speed, 1.0)))
+    really_still = stationary and (motionless >= MOTIONLESS_MIN) and (speed <= SPEED_MAX_STILL)
+    stationary_term = 1.0 if really_still else 0.0
+
+    speed_term_raw = max(0.0, min(1.0, 1.0 - min(speed, 1.0)))
+    speed_term = 0.0 if speed > SPEED_MAX_STILL else speed_term_raw
+
     score = 0.55 * ratio_term + 0.30 * stationary_term + 0.15 * speed_term
 
-    log(f"🐶 Zones={zones}, ratio={ratio:.2f}, stationary={stationary}, speed={speed:.2f}, score={score:.3f}")
+    log(f"🐶 Zones={zones}, ratio={ratio:.2f}, stationary={stationary}, motionless={motionless}, "
+        f"speed={speed:.2f}, still={really_still}, score={score:.3f}")
 
     state.last_ts = time.time()
+    last_seen_dog_ts = state.last_ts
     state.last_bbox = box
     t = time.time()
 
@@ -185,13 +214,16 @@ def on_message(client, _userdata, msg):
             state.in_squat = True
             log("⏳ POSSIVEL_DEFECACAO iniciada")
             mqtt_publish(client, TOPIC_STATE, "POSSIVEL_DEFECACAO")
+            # abrir episódio se ainda não houver
+            if not state.episode_active:
+                state.episode_active = True
+                state.episode_started_ts = t
         else:
             if (t - state.squat_start) >= SQUAT_MIN_S:
                 log("💩 DEFECANDO (mantida postura)")
                 mqtt_publish(client, TOPIC_STATE, "DEFECANDO")
 
         state.roi_anchor = roi_from_bbox(box, img.shape, pad=20)
-        # baseline rápida (opcional) – não é usada para confirmar resíduo
         roi_quick = safe_roi(img, state.roi_anchor)
         state.bg_roi = None if roi_quick is None else roi_quick.copy()
 
@@ -214,7 +246,7 @@ def roi_from_bbox(b, frame_shape, pad=20):
     return (x1r, y1r, x2r - x1r, y2r - y1r)
 
 def residue_blob(bg_roi, cur_roi):
-    # Tolerante a entradas inválidas
+    """Compara bg_roi vs cur_roi e retorna melhor contorno compatível com 'cocô' (anti-xixi)."""
     if bg_roi is None or cur_roi is None:
         return None
     if bg_roi.size == 0 or cur_roi.size == 0:
@@ -231,19 +263,39 @@ def residue_blob(bg_roi, cur_roi):
     _, th = cv2.threshold(d, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
     th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((3,3),np.uint8), iterations=1)
     th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8), iterations=2)
-    cnts,_ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    cnts,_ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     best, best_area = None, 0
     for c in cnts:
         area = cv2.contourArea(c)
         if area < RES_MIN_A:
             continue
         x,y,w,h = cv2.boundingRect(c)
-        if w == 0 or h == 0:
+        if w < MIN_BLOB_W or h < MIN_BLOB_H:
             continue
-        ratio = min(w,h)/max(w,h)
-        if ratio < 0.25:
+
+        per = cv2.arcLength(c, True)
+        if per == 0:
             continue
+        circ = 4.0*np.pi*area/(per*per)
+
+        hull = cv2.convexHull(c)
+        hull_area = cv2.contourArea(hull) if hull is not None else 0.0
+        solidity = (area / hull_area) if hull_area > 0 else 0.0
+
+        # saturação baixa -> tende a ser poça/xixi
+        mask = np.zeros(cur_roi.shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask, [c], -1, 255, -1)
+        hsv = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2HSV)
+        mean_s = cv2.mean(hsv[:,:,1], mask=mask)[0]
+
+        if circ < MIN_CIRCULARITY:
+            continue
+        if solidity < MIN_SOLIDITY:
+            continue
+        if mean_s < HSV_S_MIN:
+            continue
+
         if area > best_area:
             M = cv2.moments(c)
             if M['m00'] == 0:
@@ -292,28 +344,47 @@ def confirm_residue_window():
             bx, by, bw, bh, (cx, cy), area = blob
             if last_ok == 0.0:
                 last_ok = time.time()
-                # centroid em coords globais:
                 x, y, w, h = state.roi_anchor
-                best_centroid = (x + cx, y + cy)
+                best_centroid = (x + cx, y + cy)  # coords globais
                 best_area = area
                 log(f"🟡 possível resíduo: area={area}")
             elif time.time() - last_ok >= RES_STATIC_S:
-                # ✅ CONFIRMADO
+                centroid_abs = best_centroid
+
+                # --- DEDUP por episódio: mescla confirmações próximas no tempo/espaço
+                if state.episode_active and state.last_confirm_ts > 0:
+                    dt = time.time() - state.last_confirm_ts
+                    dist = 1e9
+                    if state.last_confirm_centroid is not None:
+                        dx = centroid_abs[0] - state.last_confirm_centroid[0]
+                        dy = centroid_abs[1] - state.last_confirm_centroid[1]
+                        dist = (dx*dx + dy*dy) ** 0.5
+                    if dt <= EP_COOLDOWN_S and dist <= MERGE_RADIUS_PX:
+                        log(f"➿ Mesclado ao mesmo episódio (dt={dt:.1f}s, dist={int(dist)}px)")
+                        state.poop_present = True
+                        state.poop_roi = state.roi_anchor
+                        state.poop_centroid = centroid_abs
+                        threading.Thread(target=monitor_pooppresent, args=(), daemon=True).start()
+                        return
+
+                # ✅ CONFIRMADO (novo)
                 state.poop_present = True
                 state.poop_roi = state.roi_anchor
-                state.poop_centroid = best_centroid
+                state.poop_centroid = centroid_abs
+                state.last_confirm_ts = time.time()
+                state.last_confirm_centroid = centroid_abs
 
                 log("✅ Resíduo confirmado (poop detectado)")
                 mqtt_publish(client, TOPIC_STATE, "DEFECACAO_CONFIRMADA")
                 mqtt_publish(client, TOPIC_POOP, {
                     "value": True,
                     "zone": ZONE,
-                    "centroid": [int(best_centroid[0]), int(best_centroid[1])],
+                    "centroid": [int(centroid_abs[0]), int(centroid_abs[1])],
                     "area": int(best_area),
                     "ts": now_iso(),
                 })
 
-                # Tentar vincular ao evento do Frigate
+                # Vincular ao evento do Frigate (se houver)
                 evt_id = find_recent_poop_event_id(time.time())
                 payload = {
                     "ts": now_iso(),
@@ -329,7 +400,7 @@ def confirm_residue_window():
 
                 mqtt_publish(client, TOPIC_POOP_EVENT, payload)
 
-                # (Opcional) criar evento próprio “poop_confirmed”
+                # Evento “poop_confirmed” auxiliar
                 event_id = frigate_create_event(CAM, label="poop_confirmed", sub_label="watcher:auto")
                 if event_id:
                     clip_url, thumb_url = frigate_event_urls(event_id)
@@ -340,7 +411,7 @@ def confirm_residue_window():
                         "event_id": event_id,
                         "clip_url": clip_url,
                         "thumb_url": thumb_url,
-                        "centroid": [int(best_centroid[0]), int(best_centroid[1])],
+                        "centroid": [int(centroid_abs[0]), int(centroid_abs[1])],
                         "area": int(best_area)
                     })
 
@@ -404,10 +475,18 @@ log("[ellie-watcher] running with:", f"camera={CAM}", f"zone={ZONE}", f"mqtt={MQ
 log(f"Heurística: squat_thr={SQUAT_THR} min_dur={SQUAT_MIN_S}s")
 
 if ENABLE_DEBUG_WATCHER:
-    log(f"All helper variables: SQUAT_THR={SQUAT_THR}, SQUAT_MIN_S={SQUAT_MIN_S}, RES_WIN_S={RES_WIN_S}, RES_MIN_A={RES_MIN_A}, RES_STATIC_S={RES_STATIC_S}, SNAP_FPS={SNAP_FPS}, CHECK_INT_S={CHECK_INT_S}, ENABLE_DEBUG_WATCHER={ENABLE_DEBUG_WATCHER}")
+    log(f"All helper variables: SQUAT_THR={SQUAT_THR}, SQUAT_MIN_S={SQUAT_MIN_S}, RES_WIN_S={RES_WIN_S}, "
+        f"RES_MIN_A={RES_MIN_A}, RES_STATIC_S={RES_STATIC_S}, SNAP_FPS={SNAP_FPS}, CHECK_INT_S={CHECK_INT_S}, "
+        f"ENABLE_DEBUG_WATCHER={ENABLE_DEBUG_WATCHER}, EP_COOLDOWN_S={EP_COOLDOWN_S}, "
+        f"LEAVE_TIMEOUT_S={LEAVE_TIMEOUT_S}, MERGE_RADIUS_PX={MERGE_RADIUS_PX}, "
+        f"MIN_CIRCULARITY={MIN_CIRCULARITY}, MIN_SOLIDITY={MIN_SOLIDITY}, HSV_S_MIN={HSV_S_MIN}, "
+        f"MOTIONLESS_MIN={MOTIONLESS_MIN}, SPEED_MAX_STILL={SPEED_MAX_STILL}")
 
+# ---------- LOOP principal: fecha episódio quando o cão some ----------
 try:
     while True:
         time.sleep(1)
+        if state.episode_active and (time.time() - last_seen_dog_ts) >= LEAVE_TIMEOUT_S:
+            state.episode_active = False
 except KeyboardInterrupt:
     pass
