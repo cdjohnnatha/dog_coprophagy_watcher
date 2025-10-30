@@ -44,7 +44,9 @@ MIN_BLOB_H      = int(os.getenv("MIN_BLOB_H", "14"))
 MIN_CIRCULARITY = float(os.getenv("MIN_CIRCULARITY", "0.28"))  # 4πA/P²
 MIN_SOLIDITY    = float(os.getenv("MIN_SOLIDITY", "0.65"))     # A/convexHull
 HSV_S_MIN       = int(os.getenv("HSV_S_MIN", "25"))            # saturação mínima (poça molhada costuma ser baixa)
-
+SAT_MONO_GLOBAL = int(os.getenv("SAT_MONO_GLOBAL", "12"))   # S médio abaixo disso => modo P&B/IR
+TEX_MIN_MONO    = float(os.getenv("TEX_MIN_MONO", "25"))    # variância de Laplaciano mínima (textura)
+SPEC_MAX_MONO   = float(os.getenv("SPEC_MAX_MONO", "0.18")) # fração máx. de pixels muito claros (reflexo/poça)
 # --- PARADO DE VERDADE ---
 MOTIONLESS_MIN   = int(os.getenv("MOTIONLESS_MIN", "3"))
 SPEED_MAX_STILL  = float(os.getenv("SPEED_MAX_STILL", "0.15"))
@@ -82,19 +84,21 @@ def safe_roi(img, roi):
         return None
     return img[y:y2, x:x2]
 
+def is_monochrome_roi(roi_bgr, sat_thresh=SAT_MONO_GLOBAL):
+    """Retorna True se a ROI aparenta estar em P&B/IR (saturação média muito baixa)."""
+    if roi_bgr is None or roi_bgr.size == 0:
+        return False
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    s_mean = float(cv2.mean(hsv[:, :, 1])[0])
+    return s_mean < sat_thresh
+
 def frigate_create_event(camera: str, label: str, sub_label: str | None = None) -> str | None:
-    try:
-        url = f"{FR_URL}/api/events"
-        payload = {"camera": camera, "label": label}
-        if sub_label:
-            payload["sub_label"] = sub_label
-        r = requests.post(url, json=payload, timeout=3.0)
-        r.raise_for_status()
-        data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
-        return data.get("id") or data.get("event_id")
-    except Exception as e:
-        log(f"[frigate] error creating event: {e}")
-        return None
+    """
+    Em versões recentes do Frigate, a criação de eventos via API (POST /api/events)
+    não é suportada — apenas leitura. Em vez disso, retornamos None.
+    """
+    log("[frigate] skipping create_event (API não permite POST /api/events)")
+    return None
 
 def frigate_event_urls(event_id: str) -> tuple[str, str]:
     clip  = f"{FR_URL}/api/events/{event_id}/clip.mp4"
@@ -109,19 +113,27 @@ def fetch_snapshot():
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return img
 
-def find_recent_poop_event_id(ts_confirm: float) -> str | None:
+def find_nearby_dog_event_id(ts_confirm: float) -> str | None:
+    """Procura um evento DOG com clipe perto do horário da confirmação."""
     try:
-        after = int(ts_confirm - 30)
-        before = int(ts_confirm + 360)
-        url = (f"{FR_URL}/api/events"
-               f"?camera={CAM}&label=poop&has_clip=1"
-               f"&after={after}&before={before}&limit=5")
-        r = requests.get(url, timeout=3.0)
+        after = int(ts_confirm - 45)   # janelinha um pouco maior pra garantir
+        before = int(ts_confirm + 120)
+        base = f"{FR_URL}/api/events?camera={CAM}&label=dog&has_clip=1&after={after}&before={before}&limit=15"
+        # filtro por zona ajuda a pegar o momento certo
+        if ZONE:
+            base += f"&zone={ZONE}"
+        r = requests.get(base, timeout=3.0)
         r.raise_for_status()
         items = r.json() if isinstance(r.json(), list) else []
         if not items:
             return None
-        items.sort(key=lambda e: abs(ts_confirm - float(e.get("start_time", 0))))
+        # prioriza eventos que terminaram perto da confirmação
+        def score(ev):
+            st = float(ev.get("start_time", 0))
+            et = float(ev.get("end_time", st))
+            ref = et if et > 0 else st
+            return abs(ts_confirm - ref)
+        items.sort(key=score)
         return items[0].get("id")
     except Exception:
         return None
@@ -144,6 +156,7 @@ class TrackState:
     episode_started_ts: float = 0.0
     last_confirm_ts: float = 0.0
     last_confirm_centroid: tuple | None = None
+    mono_flag: bool = False
 
 state = TrackState()
 last_seen_dog_ts = 0.0  # global simples p/ saber quando "sumiu"
@@ -245,13 +258,15 @@ def roi_from_bbox(b, frame_shape, pad=20):
     y2r = min(h, int(y2 + 120) + pad)
     return (x1r, y1r, x2r - x1r, y2r - y1r)
 
-def residue_blob(bg_roi, cur_roi):
+def residue_blob(bg_roi, cur_roi, monochrome=False):
     """Compara bg_roi vs cur_roi e retorna melhor contorno compatível com 'cocô' (anti-xixi)."""
-    if bg_roi is None or cur_roi is None:
-        return None
-    if bg_roi.size == 0 or cur_roi.size == 0:
+    if bg_roi is None or cur_roi is None or bg_roi.size == 0 or cur_roi.size == 0:
         return None
     try:
+        # força mesmo tamanho
+        if bg_roi.shape[:2] != cur_roi.shape[:2]:
+            cur_roi = cv2.resize(cur_roi, (bg_roi.shape[1], bg_roi.shape[0]), interpolation=cv2.INTER_AREA)
+
         g0 = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2GRAY)
         g1 = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2GRAY)
     except cv2.error:
@@ -283,18 +298,37 @@ def residue_blob(bg_roi, cur_roi):
         hull_area = cv2.contourArea(hull) if hull is not None else 0.0
         solidity = (area / hull_area) if hull_area > 0 else 0.0
 
-        # saturação baixa -> tende a ser poça/xixi
-        mask = np.zeros(cur_roi.shape[:2], dtype=np.uint8)
-        cv2.drawContours(mask, [c], -1, 255, -1)
-        hsv = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2HSV)
-        mean_s = cv2.mean(hsv[:,:,1], mask=mask)[0]
-
+                # métricas geométricas básicas
         if circ < MIN_CIRCULARITY:
             continue
         if solidity < MIN_SOLIDITY:
             continue
-        if mean_s < HSV_S_MIN:
-            continue
+
+        mask = np.zeros(cur_roi.shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask, [c], -1, 255, -1)
+
+        if not monochrome:
+            # em modo colorido, usa saturação para filtrar poça de xixi
+            hsv = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2HSV)
+            mean_s = cv2.mean(hsv[:, :, 1], mask=mask)[0]
+            if mean_s < HSV_S_MIN:
+                continue
+        else:
+            # em P&B/IR: use textura + highlights para diferenciar
+            gray = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2GRAY)
+
+            # textura: cocô costuma ter bordas/ruído de alta frequência
+            var_lap = cv2.Laplacian(gray, cv2.CV_64F).var()
+            if var_lap < TEX_MIN_MONO:
+                # muito "liso" => tende a ser poça/reflexo
+                continue
+
+            # highlights especulares: poça molhada brilha no IR
+            area_mask = max(1, int(cv2.countNonZero(mask)))
+            bright = cv2.countNonZero(cv2.bitwise_and((gray > 235).astype(np.uint8)*255, mask))
+            frac_bright = bright / float(area_mask)
+            if frac_bright > SPEC_MAX_MONO:
+                continue
 
         if area > best_area:
             M = cv2.moments(c)
@@ -337,9 +371,14 @@ def confirm_residue_window():
             state.residue_bg = baseline.copy()   # guarda para monitoramento posterior
             log("📸 Baseline capturada para janela de resíduo")
             time.sleep(max(0.1, 1.0 / max(1.0, SNAP_FPS)))
+             # detecta se a ROI está com saturação muito baixa (modo IR/P&B)
+            try:
+                state.mono_flag = is_monochrome_roi(baseline)
+            except Exception:
+                state.mono_flag = False
             continue
 
-        blob = residue_blob(baseline, cur_roi)
+        blob = residue_blob(baseline, cur_roi, monochrome=state.mono_flag)
         if blob:
             bx, by, bw, bh, (cx, cy), area = blob
             if last_ok == 0.0:
@@ -384,36 +423,32 @@ def confirm_residue_window():
                     "ts": now_iso(),
                 })
 
-                # Vincular ao evento do Frigate (se houver)
-                evt_id = find_recent_poop_event_id(time.time())
+                evt_id = find_nearby_dog_event_id(time.time())
+                if not evt_id:
+                    ts = int(time.time())
+                    payload["export_url"] = f"{FR_URL}/api/export/{CAM}?start={ts-10}&end={ts+10}"
+
                 payload = {
                     "ts": now_iso(),
                     "camera": CAM,
                     "zone": ZONE,
                     "event_id": evt_id or "",
                 }
+
+                # URLs diretas do Frigate (úteis p/ debug ou widgets custom)
                 if evt_id:
-                    base_api = f"{FR_PUBLIC}/api/events/{evt_id}"
+                    base_api = f"{FR_URL}/api/events/{evt_id}"
                     payload["clip_url"]  = f"{base_api}/clip.mp4"
                     payload["thumb_url"] = f"{base_api}/thumbnail.jpg"
                     payload["snapshot"]  = f"{base_api}/snapshot.jpg"
+                    payload["ha_clip"]   = f"/api/frigate/notifications/{evt_id}/clip.mp4"
+                    payload["ha_thumb"]  = f"/api/frigate/notifications/{evt_id}/thumbnail.jpg"
+                else:
+                    # se não houver evento, usa placeholder vazio (não gera URL quebrada)
+                    payload["clip_url"] = payload["thumb_url"] = payload["snapshot"] = ""
+                    payload["ha_clip"] = payload["ha_thumb"] = ""
 
                 mqtt_publish(client, TOPIC_POOP_EVENT, payload)
-
-                # Evento “poop_confirmed” auxiliar
-                event_id = frigate_create_event(CAM, label="poop_confirmed", sub_label="watcher:auto")
-                if event_id:
-                    clip_url, thumb_url = frigate_event_urls(event_id)
-                    mqtt_publish(client, TOPIC_POOP_EVENT, {
-                        "ts": now_iso(),
-                        "camera": CAM,
-                        "zone": ZONE,
-                        "event_id": event_id,
-                        "clip_url": clip_url,
-                        "thumb_url": thumb_url,
-                        "centroid": [int(centroid_abs[0]), int(centroid_abs[1])],
-                        "area": int(best_area)
-                    })
 
                 # Começa a vigiar a limpeza
                 threading.Thread(target=monitor_pooppresent, args=(), daemon=True).start()
@@ -442,8 +477,8 @@ def monitor_pooppresent():
         if cur_roi is None or cur_roi.size == 0:
             continue
 
-        baseline = state.residue_bg if state.residue_bg is not None else state.bg_roi
-        blob = residue_blob(baseline, cur_roi)
+        baseline = state.residue_bg  # sempre a baseline da janela
+        blob = residue_blob(baseline, cur_roi, monochrome=state.mono_flag)
         if blob is None:
             miss += 1
         else:
