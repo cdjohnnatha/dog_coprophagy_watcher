@@ -22,10 +22,12 @@ export RESIDUE_MIN_AREA=$(jq -r '.residue_min_area' $OPTS)
 export RESIDUE_STATIC_SEC=$(jq -r '.residue_static_sec' $OPTS)
 export SNAPSHOT_FPS=$(jq -r '.snapshot_fps' $OPTS)
 export CHECK_INTERVAL_S=$(jq -r '.check_interval_s' $OPTS)
+export ENABLE_DEBUG_WATCHER="$(jq -r '.enable_debug_watcher' $OPTS || echo 'false')"
 
 echo "[Ellie Watcher] Iniciando com:"
 echo "MQTT: ${MQTT_HOST}:${MQTT_PORT} user=${MQTT_USER}"
 echo "Frigate: ${FRIGATE_BASE_URL} camera=${CAMERA_NAME} zone=${TOILET_ZONE}"
 echo "Heurística: squat=${SQUAT_SCORE_THRESH} min_dur=${SQUAT_MIN_DURATION_S}"
+echo "Debug: ${ENABLE_DEBUG_WATCHER}"
 
 exec python -u /app/app.py
