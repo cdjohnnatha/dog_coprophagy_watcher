@@ -43,13 +43,16 @@ MIN_BLOB_W      = int(os.getenv("MIN_BLOB_W", "14"))
 MIN_BLOB_H      = int(os.getenv("MIN_BLOB_H", "14"))
 MIN_CIRCULARITY = float(os.getenv("MIN_CIRCULARITY", "0.28"))  # 4πA/P²
 MIN_SOLIDITY    = float(os.getenv("MIN_SOLIDITY", "0.65"))     # A/convexHull
-HSV_S_MIN       = int(os.getenv("HSV_S_MIN", "25"))            # saturação mínima (poça molhada costuma ser baixa)
-SAT_MONO_GLOBAL = int(os.getenv("SAT_MONO_GLOBAL", "12"))   # S médio abaixo disso => modo P&B/IR
-TEX_MIN_MONO    = float(os.getenv("TEX_MIN_MONO", "25"))    # variância de Laplaciano mínima (textura)
-SPEC_MAX_MONO   = float(os.getenv("SPEC_MAX_MONO", "0.18")) # fração máx. de pixels muito claros (reflexo/poça)
-# --- PARADO DE VERDADE ---
+HSV_S_MIN       = int(os.getenv("HSV_S_MIN", "25"))            # minimum saturation (wet poop usually has low saturation)
+SAT_MONO_GLOBAL = int(os.getenv("SAT_MONO_GLOBAL", "12"))   # S mean below this => P&B/IR mode
+TEX_MIN_MONO    = float(os.getenv("TEX_MIN_MONO", "25"))    # minimum variance of Laplacian (texture)
+SPEC_MAX_MONO   = float(os.getenv("SPEC_MAX_MONO", "0.18")) # maximum fraction of very bright pixels (reflection/poop)
+# --- Still on position ---
 MOTIONLESS_MIN   = int(os.getenv("MOTIONLESS_MIN", "3"))
 SPEED_MAX_STILL  = float(os.getenv("SPEED_MAX_STILL", "0.15"))
+
+FRIGATE_EVENT_POOP_SUB_LABEL = os.getenv("FRIGATE_EVENT_POOP_SUB_LABEL", "poop")
+FRIGATE_EVENT_COPROPHAGY_SUB_LABEL = os.getenv("FRIGATE_EVENT_COPROPHAGY_SUB_LABEL", "coprophagy")
 
 # ---------- DEBUG / LOGGER ----------
 def log(*args, mqtt_debug=True):
@@ -94,11 +97,22 @@ def is_monochrome_roi(roi_bgr, sat_thresh=SAT_MONO_GLOBAL):
 
 def frigate_create_event(camera: str, label: str, sub_label: str | None = None) -> str | None:
     """
-    Em versões recentes do Frigate, a criação de eventos via API (POST /api/events)
-    não é suportada — apenas leitura. Em vez disso, retornamos None.
+    In recent Frigate versions, event creation via API (POST /api/events)
+    is not supported - only reading is allowed. Instead, we return None.
     """
-    log("[frigate] skipping create_event (API não permite POST /api/events)")
+    log("[frigate] skipping create_event (API does not allow POST /api/events)")
     return None
+
+def frigate_update_event_sub_label(event_id: str, sub_label: str) -> bool:
+    """Update the sub_label of an event in Frigate."""
+    try:
+        url = f"{FR_URL}/api/events/{event_id}"
+        r = requests.patch(url, json={"sub_label": sub_label}, timeout=3.0)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log(f"[frigate] error updating sub_label ({sub_label}) for {event_id}: {e}")
+        return False
 
 def frigate_event_urls(event_id: str) -> tuple[str, str]:
     clip  = f"{FR_URL}/api/events/{event_id}/clip.mp4"
@@ -415,18 +429,22 @@ def confirm_residue_window():
 
                 log("✅ Resíduo confirmado (poop detectado)")
                 mqtt_publish(client, TOPIC_STATE, "DEFECACAO_CONFIRMADA")
-                mqtt_publish(client, TOPIC_POOP, {
+                payload_pooppresent_true = {
                     "value": True,
                     "zone": ZONE,
                     "centroid": [int(centroid_abs[0]), int(centroid_abs[1])],
                     "area": int(best_area),
                     "ts": now_iso(),
-                })
+                }
+                client.publish(TOPIC_POOP, json.dumps(payload_pooppresent_true, separators=(",", ":")), qos=0, retain=True)
 
                 evt_id = find_nearby_dog_event_id(time.time())
                 if not evt_id:
-                    ts = int(time.time())
-                    payload["export_url"] = f"{FR_URL}/api/export/{CAM}?start={ts-10}&end={ts+10}"
+                    new_id = frigate_create_event(CAM, "poop", "watcher:confirmed")
+                    if new_id:
+                        evt_id = new_id
+                        # opcional: dar um pequeno respiro para o Frigate materializar thumb/clip
+                        time.sleep(0.9)
 
                 payload = {
                     "ts": now_iso(),
@@ -435,7 +453,6 @@ def confirm_residue_window():
                     "event_id": evt_id or "",
                 }
 
-                # URLs diretas do Frigate (úteis p/ debug ou widgets custom)
                 if evt_id:
                     base_api = f"{FR_URL}/api/events/{evt_id}"
                     payload["clip_url"]  = f"{base_api}/clip.mp4"
@@ -443,12 +460,9 @@ def confirm_residue_window():
                     payload["snapshot"]  = f"{base_api}/snapshot.jpg"
                     payload["ha_clip"]   = f"/api/frigate/notifications/{evt_id}/clip.mp4"
                     payload["ha_thumb"]  = f"/api/frigate/notifications/{evt_id}/thumbnail.jpg"
-                else:
-                    # se não houver evento, usa placeholder vazio (não gera URL quebrada)
-                    payload["clip_url"] = payload["thumb_url"] = payload["snapshot"] = ""
-                    payload["ha_clip"] = payload["ha_thumb"] = ""
 
-                mqtt_publish(client, TOPIC_POOP_EVENT, payload)
+                    frigate_update_event_sub_label(evt_id, FRIGATE_EVENT_POOP_SUB_LABEL)
+                    mqtt_publish(client, TOPIC_POOP_EVENT, payload)
 
                 # Começa a vigiar a limpeza
                 threading.Thread(target=monitor_pooppresent, args=(), daemon=True).start()
@@ -487,7 +501,8 @@ def monitor_pooppresent():
         if miss >= 3:
             state.poop_present = False
             log("🧹 Cocô removido → estado IDLE")
-            mqtt_publish(client, TOPIC_POOP, {"value": False, "zone": ZONE, "ts": now_iso()})
+            payload_pooppresent_false = {"value": False, "zone": ZONE, "ts": now_iso()}
+            client.publish(TOPIC_POOP, json.dumps(payload_pooppresent_false, separators=(",", ":")), qos=0, retain=True)
             mqtt_publish(client, TOPIC_STATE, "IDLE")
             return
 
