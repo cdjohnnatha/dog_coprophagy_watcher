@@ -1,5 +1,5 @@
 name: Ellie Watcher
-version: "2.0.0"
+version: "2.0.3"
 slug: ellie-watcher
 description: Heuristic detection (poop/coprophagia) integrated with Frigate/MQTT.
 arch:

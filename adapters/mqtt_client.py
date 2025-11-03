@@ -4,7 +4,7 @@ MQTT client adapter for publishing and subscribing.
 import json
 import paho.mqtt.client as mqtt
 from typing import Callable, Optional, Dict, Any
-from ..settings import Settings
+from settings import Settings
 
 
 class MQTTClient:
@@ -129,16 +129,17 @@ class MQTTClient:
         }
         self.publish(topic, payload)
     
-    def log(self, message: str) -> None:
+    def log(self, *args: Any) -> None:
         """
         Log debug message.
         
         Args:
-            message: Log message
+            *args: Log message parts
         """
         if not self.debug_enabled:
             return
         
+        message = " ".join(str(arg) for arg in args)
         print(message, flush=True)
         
         try:

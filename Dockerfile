@@ -35,8 +35,13 @@ import cv2, numpy
 print("cv2:", cv2.__version__, "numpy:", numpy.__version__)
 PY
 
-# app
-COPY app.py /app/app.py
+# Copy entire application structure
+COPY settings.py /app/settings.py
+COPY main.py /app/main.py
+COPY __main__.py /app/__main__.py
+COPY domain/ /app/domain/
+COPY adapters/ /app/adapters/
+COPY app/ /app/app/
 COPY run.sh /app/run.sh
 RUN chmod +x /app/run.sh
 

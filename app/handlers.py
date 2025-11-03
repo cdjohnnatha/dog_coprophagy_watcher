@@ -3,7 +3,7 @@ MQTT message handlers - Transform MQTT messages into service calls.
 """
 import json
 from typing import Optional
-from ..domain.models import DogDetection, BBox
+from domain.models import DogDetection, BBox
 
 
 class MQTTHandlers:

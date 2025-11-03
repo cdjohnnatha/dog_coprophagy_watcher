@@ -4,8 +4,8 @@ Frigate API client for interacting with Frigate NVR.
 import requests
 import numpy as np
 from typing import Optional, List, Dict, Any
-from ..settings import Settings
-from .cv_ops import decode_image
+from settings import Settings
+from adapters.cv_ops import decode_image
 
 
 class FrigateClient:

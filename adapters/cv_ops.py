@@ -5,8 +5,8 @@ All CV-related functionality isolated here.
 import cv2
 import numpy as np
 from typing import Optional, Tuple, List
-from ..domain.models import Blob, ROI, ShapeParams
-from ..domain import heuristics
+from domain.models import Blob, ROI, ShapeParams
+from domain import heuristics
 
 
 def safe_roi(img: Optional[np.ndarray], roi: Optional[ROI]) -> Optional[np.ndarray]:

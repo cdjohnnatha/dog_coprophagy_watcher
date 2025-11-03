@@ -1,19 +1,19 @@
 """
-Compatibility shim for app.py - Redirects to new layered architecture.
+DEPRECATED: This file is no longer used.
 
-The original monolithic app.py has been refactored into a clean, layered architecture.
-This file now serves as a compatibility entry point that uses the new structure.
+The application now uses main.py as the entry point.
+This file is kept for reference only.
 
-To run directly with the new architecture:
-    python -m dog_coprophagy_watcher
-or
+To run the application:
     python main.py
+or
+    python -m dog_coprophagy_watcher
 
 See README.md for architecture details and migration guide.
 """
 
-# Import and run from the new architecture
-from app.runner import run
-
-if __name__ == "__main__":
-    run()
+# This file is deprecated and should not be executed.
+# Use main.py instead.
+raise RuntimeError(
+    "app.py is deprecated. Please use 'python main.py' or 'python -m dog_coprophagy_watcher' instead."
+)

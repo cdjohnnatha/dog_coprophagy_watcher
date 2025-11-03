@@ -12,7 +12,7 @@ from .models import (
 )
 from .fsm import EllieFSM, Signal, Command
 from . import heuristics
-from ..settings import Settings
+from settings import Settings
 
 
 class EllieWatcherService:
