@@ -1,192 +1,157 @@
-# Dog Coprophagy Watcher (Ellie Watcher)
+# Ellie Watcher - Dog Coprophagy Detection System
 
-A smart monitoring system that detects when your dog is defecating and tracks poop cleanup using computer vision and MQTT integration with Frigate.
-
-## What It Does
-
-This application monitors your dog through Frigate's video surveillance system and:
-
-1. **Detects Squatting Behavior**: Uses computer vision heuristics to identify when your dog is in a defecation posture
-2. **Confirms Defecation**: Monitors for the appearance of fecal matter after squatting
-3. **Tracks Cleanup**: Continuously monitors until the poop is cleaned up
-4. **MQTT Notifications**: Publishes real-time status updates via MQTT for integration with home automation systems
-
-## How It Works
-
-### Squat Detection
-The system analyzes bounding boxes from Frigate's object detection using multiple heuristics:
-- **Aspect Ratio**: Dogs appear shorter and wider when squatting
-- **Motion Analysis**: Stationary behavior indicates potential defecation
-- **Lower Body Analysis**: Edge density in the lower body region confirms posture
-
-### Residue Detection
-After detecting squatting, the system:
-- Captures a background image of the area below the dog
-- Monitors for new "blobs" (potential poop) using image differencing
-- Confirms persistent objects to avoid false positives
-- Tracks cleanup by monitoring when the detected blob disappears
-
-### State Machine
-```
-IDLE → POSSIVEL_DEFECACAO → DEFECANDO → AGUARDANDO_CONFIRMACAO → DEFECACAO_CONFIRMADA → IDLE
-```
-
-## Prerequisites
-
-- **Frigate**: Video surveillance system with object detection
-- **MQTT Broker**: For receiving events from Frigate and publishing status updates
-- **Python 3.11+** or Docker
-- **FFmpeg**: Required for video processing (install with `apt install ffmpeg` on Ubuntu/Debian, `brew install ffmpeg` on macOS)
-
-## Dataset Processing
-
-For preparing video datasets for model training, use the included dataset processing script:
-
-```bash
-./scripts/process_dataset.sh
-```
-
-This interactive script normalizes video files (resolution, frame rate, format) and extracts metadata for machine learning workflows. See `scripts/process_dataset_readme.md` for detailed usage instructions.
-
-## Quick Start with Docker
-
-1. **Clone and configure**:
-   ```bash
-   git clone <repository>
-   cd dog_coprophagy_watcher
-   ```
-
-2. **Create environment file**:
-   ```bash
-   cp .env.sample .env
-   # Edit .env with your configuration
-   ```
-
-3. **Configure your environment** (`.env`):
-   ```bash
-   # MQTT Configuration
-   MQTT_HOST=your-mqtt-host
-   MQTT_PORT=1883
-   MQTT_USER=your-username  # optional
-   MQTT_PASS=your-password  # optional
-
-   # Frigate Configuration
-   FRIGATE_BASE_URL=http://frigate:5000
-   CAMERA_NAME=ellie
-   TOILET_ZONE=toilet_zone
-
-   # Detection Parameters (tune these for your setup)
-   SQUAT_SCORE_THRESH=0.62
-   SQUAT_MIN_DURATION_S=2.0
-   RESIDUE_CONFIRM_WINDOW_S=20
-   RESIDUE_MIN_AREA=140
-   RESIDUE_STATIC_SEC=2.0
-   SNAPSHOT_FPS=4
-   CHECK_INTERVAL_S=15
-   ```
-
-4. **Run with Docker Compose**:
-   ```bash
-   docker-compose up -d
-   ```
-
-## Configuration Parameters
-
-### Core Settings
-- `FRIGATE_BASE_URL`: URL of your Frigate instance
-- `CAMERA_NAME`: Name of the camera configured in Frigate
-- `TOILET_ZONE`: Zone name in Frigate where detection should occur
-
-### MQTT Settings
-- `MQTT_HOST`: MQTT broker hostname
-- `MQTT_PORT`: MQTT broker port (default: 1883)
-- `MQTT_USER`/`MQTT_PASS`: Credentials for MQTT broker (optional)
-- `MQTT_PREFIX`: Frigate MQTT topic prefix (default: "frigate")
-
-### Detection Tuning
-- `SQUAT_SCORE_THRESH`: Minimum confidence score for squat detection (0.0-1.0)
-- `SQUAT_MIN_DURATION_S`: Minimum time dog must be squatting to confirm defecation
-- `RESIDUE_CONFIRM_WINDOW_S`: Time window to look for poop after squatting ends
-- `RESIDUE_MIN_AREA`: Minimum pixel area for detected blobs
-- `RESIDUE_STATIC_SEC`: How long a blob must persist to be considered real poop
-- `SNAPSHOT_FPS`: Frame rate for analysis when dog is detected
-- `CHECK_INTERVAL_S`: How often to check for poop cleanup
-
-## MQTT Topics
-
-### Published Topics
-- `home/ellie/state`: Current detection state
-  - `"IDLE"`: No activity
-  - `"POSSIVEL_DEFECACAO"`: Possible defecation detected
-  - `"DEFECANDO"`: Active defecation
-  - `"AGUARDANDO_CONFIRMACAO"`: Waiting for residue confirmation
-  - `"DEFECACAO_CONFIRMADA"`: Defecation confirmed
-
-- `home/ellie/poop_present`: Poop presence status
-  ```json
-  {
-    "value": true|false,
-    "zone": "toilet_zone",
-    "centroid": [x, y],
-    "area": 150,
-    "ts": "2024-01-01T12:00:00Z"
-  }
-  ```
-
-### Subscribed Topics
-- `frigate/events`: Frigate detection events (filtered for dog in specified zone)
-
-## Manual Installation
-
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Set environment variables**:
-   ```bash
-   export MQTT_HOST=your-mqtt-host
-   export FRIGATE_BASE_URL=http://frigate:5000
-   # ... other variables
-   ```
-
-3. **Run**:
-   ```bash
-   python app.py
-   ```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **No detections**: Check that Frigate is running and the camera/zone names match
-2. **False positives**: Adjust `SQUAT_SCORE_THRESH` higher
-3. **Missed detections**: Lower `SQUAT_SCORE_THRESH` or adjust other parameters
-4. **Residue not detected**: Tune `RESIDUE_MIN_AREA` and lighting conditions
-
-### Debug Tips
-
-- Monitor MQTT topics to see detection states
-- Check Frigate logs for object detection events
-- Adjust camera angle/lighting for better detection
-- Use Frigate's snapshot feature to verify camera view
+A multi-layered Python application for monitoring dog behavior and detecting coprophagy (poop eating) using computer vision and Frigate NVR integration.
 
 ## Architecture
 
-The system consists of:
-- **MQTT Event Handler**: Processes Frigate detection events
-- **Squat Detection Engine**: Computer vision analysis for posture recognition
-- **Residue Monitor**: Background subtraction for poop detection
-- **State Machine**: Manages detection workflow and notifications
+The application follows a clean, layered architecture with clear separation of concerns:
 
-## Contributing
+```
+dog_coprophagy_watcher/
+├── settings.py              # Environment configuration (Pydantic Settings)
+├── domain/                  # Core business logic (pure, no I/O)
+│   ├── models.py           # Data models and domain entities
+│   ├── heuristics.py       # Pure scoring and detection functions
+│   ├── fsm.py              # Finite State Machine for behavior tracking
+│   └── services.py         # Orchestration and workflow logic
+├── adapters/               # External integrations and I/O
+│   ├── clock.py           # Time abstraction (testable)
+│   ├── cv_ops.py          # OpenCV operations
+│   ├── frigate_client.py  # Frigate API client
+│   └── mqtt_client.py     # MQTT operations
+├── app/                    # Application layer
+│   ├── handlers.py        # MQTT message handlers
+│   └── runner.py          # Dependency injection and wiring
+├── main.py                # Entry point (direct execution)
+└── __main__.py            # Entry point (module execution)
+```
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with proper documentation
-4. Test thoroughly with your setup
-5. Submit a pull request
+## Layers Explained
 
-## License
+### 1. **Settings Layer** (`settings.py`)
+- Centralizes all environment variables using Pydantic Settings
+- Provides type-safe, validated configuration
+- Immutable settings object
 
-This project is open source. Please check the license file for details.
+### 2. **Domain Layer** (`domain/`)
+Pure business logic with no I/O dependencies:
+
+- **`models.py`**: Data classes for entities (TrackState, PoopEvent, DogDetection, etc.)
+- **`heuristics.py`**: Pure functions for scoring and detection
+  - `score_squat()`: Calculate squat probability
+  - `is_coprophagy()`: Determine if coprophagy occurred
+  - `is_near_poop()`: Check proximity to poop
+  - Shape and texture filtering functions
+- **`fsm.py`**: Finite State Machine managing Ellie's states
+  - States: IDLE, POSSIVEL_DEFECACAO, DEFECANDO, etc.
+  - Signals: SQUAT_START, RESIDUE_CONFIRMED, etc.
+  - Returns Commands for adapters to execute
+- **`services.py`**: Orchestration service coordinating workflows
+  - Manages confirmation windows
+  - Coordinates monitoring threads
+  - Translates FSM commands to adapter calls
+
+### 3. **Adapters Layer** (`adapters/`)
+External integrations and I/O operations:
+
+- **`clock.py`**: Time abstraction (SystemClock, MockClock for testing)
+- **`cv_ops.py`**: All OpenCV operations
+  - Image decoding, ROI extraction
+  - Blob detection and area calculation
+  - Monochrome detection
+- **`frigate_client.py`**: Frigate NVR API client
+  - Snapshot fetching
+  - Event searching and updating
+  - URL generation
+- **`mqtt_client.py`**: MQTT operations
+  - Publishing state, events, alerts
+  - Connection management
+  - Debug logging
+
+### 4. **Application Layer** (`app/`)
+Wiring and request handling:
+
+- **`handlers.py`**: MQTT message handlers
+  - Transforms MQTT payloads into domain DTOs
+  - Calls service methods
+- **`runner.py`**: Application bootstrap
+  - Dependency injection
+  - Wiring all components
+  - Main event loop
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+## Running
+
+### As a module:
+```bash
+python -m dog_coprophagy_watcher
+```
+
+### Direct execution:
+```bash
+python main.py
+```
+
+### Using the original entry point:
+```bash
+python app.py  # Still works, imports from new structure
+```
+
+## Environment Variables
+
+All configuration is done via environment variables. See `settings.py` for the complete list. Key variables:
+
+- `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS`
+- `FRIGATE_BASE_URL`, `CAMERA_NAME`, `TOILET_ZONE`
+- `SQUAT_SCORE_THRESH`, `SQUAT_MIN_DURATION_S`
+- `ENABLE_DEBUG_WATCHER`
+
+## Testing
+
+The layered architecture makes testing easy:
+
+```python
+from adapters.clock import MockClock
+from domain.heuristics import score_squat
+
+# Test pure functions
+score = score_squat(ratio=0.5, stationary=True, speed=0.1, ...)
+assert score.is_squatting
+
+# Test with mock clock
+clock = MockClock(initial_time=1000.0)
+service = EllieWatcherService(..., clock=clock)
+clock.advance(10.0)  # Simulate time passing
+```
+
+## Benefits of This Architecture
+
+1. **Testability**: Pure functions and injected dependencies make unit testing trivial
+2. **Maintainability**: Clear separation of concerns, easy to locate and modify code
+3. **Extensibility**: Add new adapters (e.g., different NVR systems) without touching domain logic
+4. **Readability**: Each layer has a single responsibility
+5. **Reusability**: Domain logic can be reused in different contexts (CLI, web service, etc.)
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` folder:
+
+- **[Architecture Guide](docs/ARCHITECTURE.md)** - Detailed architecture documentation with diagrams
+- **[Migration Guide](docs/MIGRATION.md)** - Complete guide for migrating from the original monolithic code
+- **[Quick Reference](docs/QUICK_REFERENCE.md)** - Developer quick reference for common tasks
+
+## Migration from Original `app.py`
+
+The original monolithic `app.py` has been refactored into this layered structure. See the [Migration Guide](docs/MIGRATION.md) for detailed instructions.
+
+Quick steps:
+1. Install dependencies: `pip install -r requirements.txt`
+2. Update any imports if you have external code referencing the old structure
+3. Run using one of the methods above
+
+The original `app.py` can be kept as a compatibility shim if needed, or removed once migration is complete.

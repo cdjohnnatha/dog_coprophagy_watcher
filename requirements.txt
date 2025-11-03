@@ -1,6 +1,14 @@
-paho-mqtt==2.1.0
-requests==2.32.3
-python-dotenv==1.0.0
-# REMOVE these lines (installed by APK):
 # numpy==1.26.4
 # opencv-python-headless==4.10.0.84
+# REMOVE these lines (installed by APK):
+# Core dependencies
+
+paho-mqtt==2.1.0
+python-dotenv==1.0.0
+requests==2.32.3
+opencv-python>=4.8.0 # new addition
+pydantic>=2.0.0  # new addition
+pydantic-settings>=2.0.0  # new addition
+numpy>=1.24.0
+
+
