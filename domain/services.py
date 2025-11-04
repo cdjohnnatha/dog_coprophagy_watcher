@@ -571,4 +571,26 @@ class EllieWatcherService:
         ):
             self.state.episode_active = False
             self.mqtt.log("Episode closed (dog left)")
+    
+    def _confirm_residue(self, baseline_roi, current_roi):
+        blob = self.cv.diff_blob(baseline_roi, current_roi)
+        if blob is None: return False, None
+        if self.settings.ml_enabled:
+            score = self.poop_clf.predict(current_roi)
+            if score.prob_poop < self.settings.poop_thresh:
+                return False, None
+        return True, blob  # confirma
+
+    def _check_coprophagy(self, baseline_roi, current_roi, near_accum_s):
+        if near_accum_s < self.settings.copro_min_dur_s:
+            return False, None
+        area0 = self.cv.diff_area(baseline_roi) or 1
+        area1 = self.cv.diff_area(current_roi) or 1
+        drop = 1.0 - (area1/area0)
+        ml_ok = True
+        if self.settings.ml_enabled:
+            score = self.copro_clf.predict_pair(baseline_roi, current_roi)
+            ml_ok = (score.prob_eaten >= self.settings.copro_thresh)
+        ok = ml_ok and (drop >= self.settings.copro_area_drop_min)
+        return ok, dict(drop=drop, ml=score.prob_eaten if self.settings.ml_enabled else None)
 
