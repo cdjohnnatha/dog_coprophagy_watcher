@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     cum_window_s: float = Field(default=900.0, alias="CUM_WINDOW_S")
     area_post_leave_s: float = Field(default=3.0, alias="AREA_POST_LEAVE_S")
     ignore_sat_night: bool = Field(default=True, alias="IGNORE_SAT_NIGHT")
+
+    # ML Configuration
+    ml_enabled: bool = True
+    poop_model_path: str = "/data/models/poop_residue_mnv3.tflite"
+    copro_model_path: str = "/data/models/copro_pair_mnv3.tflite"
+    poop_thresh: float = 0.65        # p_poop minimum to confirm residue
+    copro_thresh: float = 0.70       # p_eaten minimum to confirm coprophagia
+    copro_area_drop_min: float = 0.20  # it is required to drop >= 20% (robustness)
     
     class Config:
         env_file = ".env"
