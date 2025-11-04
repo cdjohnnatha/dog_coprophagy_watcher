@@ -3,9 +3,8 @@ Domain models - Pure data structures representing business entities.
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Protocol
 import numpy as np
-
 
 # Type aliases
 BBox = Tuple[int, int, int, int]  # (x1, y1, x2, y2)
@@ -170,3 +169,16 @@ class CoprophagyThresholds:
     cum_drop_frac: float
     cum_window_s: float
 
+@dataclass
+class PoopResidueScore:
+    prob_poop: float
+
+@dataclass
+class CoprophagyScore:
+    prob_eaten: float
+
+class PoopResidueClassifier(Protocol):
+    def predict(self, roi_bgr: np.ndarray) -> PoopResidueScore:
+
+class CoprophagyClassifier(Protocol):
+    def predict(self, roi_bgr: np.ndarray, after_bgr: np.ndarray) -> CoprophagyScore:
