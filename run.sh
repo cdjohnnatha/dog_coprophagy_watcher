@@ -30,4 +30,4 @@ echo "Frigate: ${FRIGATE_BASE_URL} camera=${CAMERA_NAME} zone=${TOILET_ZONE}"
 echo "Heurística: squat=${SQUAT_SCORE_THRESH} min_dur=${SQUAT_MIN_DURATION_S}"
 echo "Debug: ${ENABLE_DEBUG_WATCHER}"
 
-exec python -u /app/main.py
+exec python -u /app/watcher/main.py
