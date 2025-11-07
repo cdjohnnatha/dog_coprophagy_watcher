@@ -26,3 +26,18 @@ datasets/**/*.mp4
 !assets/audios
 assets/**/*
 tmp/
+*.DS_Store
+
+# ML artifacts and datasets (tracked externally)
+artifacts/
+datasets/**
+!datasets/**/.keep
+
+# TF dataset caches
+cache_train*
+cache_val*
+
+# Virtual envs and local configs
+venv/
+conda-*/
+*.ipynb_checkpoints/
