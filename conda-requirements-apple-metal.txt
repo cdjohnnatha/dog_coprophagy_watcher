@@ -1,0 +1,27 @@
+# === TensorFlow Metal (compatível macOS ARM + Py 3.10) ===
+numpy>=1.23.5,<1.24
+tensorflow-macos==2.12.0
+tensorflow-metal==1.0.0
+keras==2.12.*
+tensorboard==2.12.*
+tensorflow-io-gcs-filesystem==0.32.0
+
+# === Ciência de dados (compatíveis com NumPy <1.24) ===
+pandas>=2.0,<2.2
+scikit-learn>=1.3,<1.5
+matplotlib>=3.7,<3.9
+
+# === Vídeo/Imagem (compatíveis com NumPy 1.23/1.26) ===
+# escolha UMA das variantes (GUI ou headless). Recomendo headless p/ servidor.
+opencv-python-headless==4.10.0.84
+# opencv-python==4.10.0.84
+Pillow>=10.0,<11.0
+
+# === Utilitários de treino ===
+tqdm>=4.66,<5
+tensorboard-data-server==0.7.2
+tensorboard-plugin-wit==1.8.1
+
+# === Opcionais (debug) ===
+jupyterlab
+notebook
