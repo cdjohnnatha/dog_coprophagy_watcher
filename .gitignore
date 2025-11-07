@@ -22,3 +22,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+datasets/**/*.mp4
+!assets/audios
+assets/**/*
+tmp/

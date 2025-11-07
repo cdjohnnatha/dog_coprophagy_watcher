@@ -5,9 +5,9 @@ from typing import Optional
 
 import tensorflow as tf
 
-from .data_index import index_dataset, train_val_split
-from .dataset import make_dataset
-from .model import build_model
+from ..data.data_index import index_dataset, train_val_split
+from ..data.dataset import make_dataset
+from ..models.model import build_model
 
 
 @dataclass
