@@ -36,12 +36,7 @@ print("cv2:", cv2.__version__, "numpy:", numpy.__version__)
 PY
 
 # Copy entire application structure
-COPY settings.py /app/settings.py
-COPY main.py /app/main.py
-COPY __main__.py /app/__main__.py
-COPY domain/ /app/domain/
-COPY adapters/ /app/adapters/
-COPY app/ /app/app/
+COPY watcher/ /app/watcher/
 COPY run.sh /app/run.sh
 RUN chmod +x /app/run.sh
 
