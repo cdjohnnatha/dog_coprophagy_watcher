@@ -104,7 +104,41 @@ class Settings(BaseSettings):
         return topics.get(name, f"home/ellie/{name}")
 
 
+def _maybe_apply_thresholds_from_file(s: Settings) -> None:
+    """Override ML thresholds from a JSON file if present.
+    Order of precedence:
+      1) THRESHOLDS_JSON env var path
+      2) /data/thresholds.json (add-on writable data)
+      3) /config/ellie_thresholds.json (HA config share)
+    Keys: poop_threshold, copro_threshold
+    """
+    import json
+    candidates = [
+        os.environ.get("THRESHOLDS_JSON", ""),
+        "/data/thresholds.json",
+        "/config/ellie_thresholds.json",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            if os.path.isfile(path):
+                with open(path, "r") as f:
+                    j = json.load(f)
+                if isinstance(j, dict):
+                    if "poop_threshold" in j:
+                        s.poop_thresh = float(j["poop_threshold"])  # type: ignore[attr-defined]
+                    if "copro_threshold" in j:
+                        s.copro_thresh = float(j["copro_threshold"])  # type: ignore[attr-defined]
+                break
+        except Exception:
+            # ignore malformed files
+            continue
+
+
 def load_settings() -> Settings:
     """Load and return application settings."""
-    return Settings()
+    s = Settings()
+    _maybe_apply_thresholds_from_file(s)
+    return s
 
