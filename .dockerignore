@@ -1,0 +1,16 @@
+# Exclude heavy/local-only files from Docker context
+assets/
+artifacts/
+datasets/
+ml/
+venv/
+**/__pycache__/
+*.ipynb
+.DS_Store
+.git/
+.cache/
+.tmp/
+*.tflite
+*.keras
+cache_train*/
+cache_val*/
