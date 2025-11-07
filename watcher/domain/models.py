@@ -179,6 +179,8 @@ class CoprophagyScore:
 
 class PoopResidueClassifier(Protocol):
     def predict(self, roi_bgr: np.ndarray) -> PoopResidueScore:
+        ...
 
 class CoprophagyClassifier(Protocol):
     def predict(self, roi_bgr: np.ndarray, after_bgr: np.ndarray) -> CoprophagyScore:
+        ...
