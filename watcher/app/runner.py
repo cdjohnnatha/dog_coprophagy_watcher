@@ -2,13 +2,13 @@
 Application runner - Dependency injection and wiring.
 """
 import time
-from settings import load_settings
-from adapters.clock import SystemClock
-from adapters import cv_ops
-from adapters.frigate_client import FrigateClient
-from adapters.mqtt_client import MQTTClient
-from domain.services import EllieWatcherService
-from app.handlers import MQTTHandlers
+from watcher.settings import load_settings
+from watcher.adapters.clock import SystemClock
+from watcher.adapters import cv_ops
+from watcher.adapters.frigate_client import FrigateClient
+from watcher.adapters.mqtt_client import MQTTClient
+from watcher.domain.services import EllieWatcherService
+from watcher.app.handlers import MQTTHandlers
 
 
 class Application:
