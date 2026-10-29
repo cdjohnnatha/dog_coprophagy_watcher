@@ -21,6 +21,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | `sensor.ellie_pad_changed_at` | sensor, `device_class: timestamp` | Current pad's change time (US7). Attr: `source`, `days_in_use`, `pees_since`, `pad_color`, `image`, `history` (last 10 changes incl. undone) |
 | `sensor.ellie_pad_change_due` | sensor, `device_class: timestamp` | `changed_at + pad_change_days`. `unknown` until a first change exists |
 | `number.ellie_pad_change_days` | number 1–7 d, default 3 | Tunable 6 (FR-027) |
+| `image.ellie_last_pee_photo`, `image.ellie_review_before`, `image.ellie_review_after` | image (MQTT) | Photos for the dashboard. A `/media/local/...` URL in a card needs a signed URL, so the app sends the bytes and HA serves them with its own auth |
 
 ## Defined in the HA repo (`/homeassistant`)
 
@@ -31,6 +32,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | Pad change reminder (FR-027) + pad notification actions + clear on `ellie/pad/changed` | same file | Triggers: `sensor.ellie_pad_change_due` (time trigger on a timestamp sensor) and `input_datetime.ellie_waking_start`. Conditions: due ≤ now, inside waking hours, not reminded today. `tag: ellie_pad_reminder` |
 | Scripts `script.ellie_label_visit` (`visit_id`, `label`), `script.ellie_add_manual_pee` (`at`), `script.ellie_reject_last_pee`, `script.ellie_mark_pad_changed` (`at?`), `script.ellie_undo_pad_change` | `custom/scripts/ellie-pee-counter.yaml` | Publish to `ellie/cmd/*`. `unique_id` on each |
 | Helpers above | `custom/helpers/…` (input_datetime) and `configuration.yaml` inline `input_number` (repo convention) | `unique_id`-capable definitions |
+| Gemini credit alerts | same automations file + `input_number.ellie_gemini_credit_eur` | `ellie/alert` -> notification (hard alert). `ellie_v3_gemini_credit_low` warns at 80 % of the credit declared in the helper (total credit ever added, euros), using `estimated_cost_eur_total` of `sensor.ellie_analysis_calls_month`. The helper has no `initial`: set it once to what was paid (about 4.5 for R$ 30) |
 
 ## Ellie dashboard (`/dashboard-ellie`, storage mode)
 
@@ -49,6 +51,7 @@ Cards (all texts pt-BR):
 
 - Uncertain: title "Ellie: fez xixi?" · message "Visita às {HH:MM} — {reason}" · actions "Fez xixi" / "Não fez".
 - Unknown: title "Ellie: não consegui analisar" · message "Visita às {HH:MM} ({motivo}). Toque para revisar."
+- Gemini: "Ellie: créditos do Gemini acabaram" (hard, HTTP 402), "Ellie: chave do Gemini recusada" (401/403), "Ellie: crédito do Gemini acabando" (80 % of the declared credit).
 - No pee: title "Ellie: sem xixi há {N} h" · message "Último xixi às {HH:MM}."
 - Pad reminder: title "Ellie: hora de trocar o tapete" · message "Tapete em uso há {N} dias ({X} xixis)." · action "Já troquei".
 - Pad uncertain: title "Ellie: você trocou o tapete?" · message "Movimento no tabuleiro às {HH:MM} — {reason}" · actions "Troquei" / "Não troquei".

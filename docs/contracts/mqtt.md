@@ -7,8 +7,8 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 | Topic | Payload | Use |
 |---|---|---|
 | `frigate/pad_zone/dog` | int (count) | Visit start (`>0`) / exit (`0`) |
-| `frigate/tray_area/dog`, `frigate/tray_area/person` | int | "Area clear" for before/after frames. `person > 0` with no dog visit open starts a person presence (US7, research R14) |
-| `frigate/pad_zone/person` | int | `person_present` flag |
+| `frigate/tray_area/dog`, `frigate/tray_area/person` | int | `person_present` flag and "area clear" for before/after frames. `person > 0` with no dog visit open starts a person presence (US7, research R14) |
+| `frigate/tray_pad/dog` | int | Seconds on the pad itself (`on_pad_s`). Zone tight around the tray, added 2026-10-29 |
 | `frigate/events` | Frigate event JSON | `after.camera == "ellie"`, `after.label == "dog"`, `"pad_zone" in after.entered_zones` → append `after.id` to the open visit |
 | `frigate/available` | `online`/`offline` | Offline during a visit → visit becomes `unknown` |
 
@@ -22,6 +22,8 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 | `ellie/review/request` | no | `{visit_id, kind: "uncertain"|"unknown"|"pad_uncertain", title, message, image: "/media/local/ellie/…/after.jpg", reason}`. For `pad_uncertain`, `visit_id` holds the presence id (`s_…`). Titles and messages are pt-BR |
 | `ellie/review/resolved` | no | `{visit_id}`. HA clears the notification tag on all devices |
 | `ellie/pad/changed` | no | `{pad_change_id, at, source}` after any recorded pad change (or undo, with `undone: true`). HA clears the `ellie_pad_reminder` notification on all devices |
+| `ellie/alert` | no | `{kind: "credit_exhausted"|"gemini_key", title, message}`. Problems only the owner can fix (Gemini credit ran out on HTTP 402, key refused on 401/403). The app sends at most one per kind every 6 h; HA turns it into a phone + persistent notification |
+| `ellie/image/last_pee`, `ellie/image/review_before`, `ellie/image/review_after` | yes | Raw JPEG bytes for the three `image` entities, sent only when the photo changes (last counted pee; before/after of the newest visit in the review queue) |
 | `homeassistant/<component>/ellie/<object_id>/config` | yes | MQTT discovery configs |
 
 ## Commands (HA → service)
