@@ -53,9 +53,7 @@ class Analyser(Protocol):
 
     id: str
 
-    async def analyse(
-        self, before: bytes, after: bytes, during: bytes | None
-    ) -> AnalysisResult:
+    async def analyse(self, before: bytes, after: bytes, during: bytes | None) -> AnalysisResult:
         """Analyse JPEG bytes of the before/after crops and the optional during frame.
 
         Raises AnalyserError when no valid answer could be produced.
