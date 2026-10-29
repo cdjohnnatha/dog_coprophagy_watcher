@@ -178,6 +178,21 @@ class Store:
         sql = "SELECT * FROM visits WHERE needs_review = 1 ORDER BY started_at DESC LIMIT ?"
         return [_visit_from_row(r) for r in self._db.execute(sql, (limit,))]
 
+    def latest_visit(self) -> dict | None:
+        row = self._db.execute("SELECT * FROM visits ORDER BY started_at DESC LIMIT 1").fetchone()
+        return None if row is None else _visit_from_row(row)
+
+    def usage_since(self, start_iso: str) -> dict:
+        """Billed analysis calls and tokens since `start_iso` (cost_units holds in/out tokens)."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS calls,"
+            " COALESCE(SUM(json_extract(cost_units, '$.in')), 0) AS tokens_in,"
+            " COALESCE(SUM(json_extract(cost_units, '$.out')), 0) AS tokens_out"
+            " FROM analyses WHERE created_at >= ? AND cost_units IS NOT NULL",
+            (start_iso,),
+        ).fetchone()
+        return {k: int(row[k]) for k in ("calls", "tokens_in", "tokens_out")}
+
     def insert_analysis(
         self,
         visit_id: str,

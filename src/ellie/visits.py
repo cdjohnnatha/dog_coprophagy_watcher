@@ -92,6 +92,10 @@ class VisitTracker:
     def active(self) -> dict[str, Any] | None:
         return self._active.row() if self._active else None
 
+    def clear_for(self, now: datetime) -> float:
+        """Seconds tray_area has had no dog and no person (0 when it is busy)."""
+        return (now - self._clear_since).total_seconds() if self._clear_since else 0.0
+
     # --- inputs: Frigate plain count topics (never the /active variants) ---
 
     def on_pad_dog(self, count: int, now: datetime) -> list[Action]:

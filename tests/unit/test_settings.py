@@ -131,3 +131,12 @@ async def test_fetch_network_error():
     async with _client(handler) as c:
         with pytest.raises(SettingsError):
             await fetch_mqtt_service(c, "tok")
+
+
+def test_the_manifest_version_matches_the_package():
+    from pathlib import Path
+
+    import ellie
+
+    manifest = (Path(__file__).resolve().parents[2] / "config.yaml").read_text()
+    assert f'version: "{ellie.__version__}"' in manifest

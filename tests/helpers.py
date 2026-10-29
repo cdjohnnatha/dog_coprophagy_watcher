@@ -77,6 +77,10 @@ class FakeAnalyser:
         self._results = list(results or [])
         self.calls: list[dict[str, int | None]] = []
 
+    def script(self, *results: AnalysisResult | Exception) -> None:
+        """Replace the queued results (the last one keeps repeating)."""
+        self._results = list(results)
+
     async def analyse(self, before: bytes, after: bytes, during: bytes | None) -> AnalysisResult:
         self.calls.append(
             {

@@ -44,6 +44,7 @@ class Options(BaseModel):
     go2rtc_url: str = "http://ccab4aaf-frigate:1984"
     camera: str = "ellie"
     log_level: str = "info"
+    usd_to_eur: float = 0.9
 
     @property
     def analysis_area(self) -> tuple[float, float, float, float]:

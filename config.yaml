@@ -25,6 +25,8 @@ options:
   go2rtc_url: http://ccab4aaf-frigate:1984
   camera: ellie
   log_level: info
+  # Only used to show the estimated Gemini spend in euros (prices are in USD).
+  usd_to_eur: 0.9
 # gemini_api_key is optional so the app can start and report "not configured".
 # It is stored by the Supervisor and never committed. MQTT credentials come from
 # the Supervisor MQTT service, not from options.
@@ -39,3 +41,4 @@ schema:
   go2rtc_url: url
   camera: str
   log_level: list(debug|info|warning|error)
+  usd_to_eur: float(0.1,5)
