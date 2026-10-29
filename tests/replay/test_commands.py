@@ -282,3 +282,17 @@ async def test_a_manual_pee_in_the_same_second_does_not_collide_with_a_visit(rig
     ids = [v["id"] for v in visits(rig)]
     assert len(ids) == len(set(ids)) == 2
     assert rig.service.tracker.active["id"] in ids
+
+
+async def test_photos_published_before_the_mqtt_connection_exists_are_sent_after_it(rig):
+    delivered = rig.service._publish_fn
+
+    async def offline(topic, payload, retain):
+        return False  # like Bridge.publish when the client is not connected yet
+
+    rig.service._publish_fn = offline
+    await rig.service.publish_state()  # the 1-minute task can run before the connection
+    assert topics(rig, "ellie/image/last_pee") == []
+    rig.service._publish_fn = delivered
+    await rig.service.on_connect()
+    assert topics(rig, "ellie/image/last_pee")  # the placeholder reaches the broker

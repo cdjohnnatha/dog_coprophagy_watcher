@@ -1,5 +1,5 @@
 name: Ellie
-version: "3.2.2"
+version: "3.2.3"
 slug: ellie
 description: Conta os xixis da Ellie por visita ao tapete (Frigate + Gemini).
 arch:

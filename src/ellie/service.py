@@ -140,6 +140,7 @@ class Service(PadsMixin):
 
     async def on_connect(self) -> None:
         """(Re)publish discovery and the full state after every (re)connection."""
+        self._image_keys.clear()  # photos are sent again on every connection (the broker may have lost them)
         options = list(dict.fromkeys([*self.analysers, self.cfg["deciding_analyser"]]))
         for topic, payload in discovery.discovery_messages(self.version, options):
             await self._publish(topic, json.dumps(payload, ensure_ascii=False), True)
@@ -605,11 +606,14 @@ class Service(PadsMixin):
                 path = None
             if not visit_id or self._image_keys.get(topic) == visit_id or not has_photo:
                 continue
-            self._image_keys[topic] = visit_id
-            await self._publish(topic, path.read_bytes() if path else _placeholder_jpeg(), True)
+            sent = await self._publish(
+                topic, path.read_bytes() if path else _placeholder_jpeg(), True
+            )
+            if sent is not False:  # a dropped publish (no MQTT connection yet) must be retried
+                self._image_keys[topic] = visit_id
 
-    async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> None:
-        await self._publish_fn(topic, payload, retain)
+    async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
+        return await self._publish_fn(topic, payload, retain)
 
     def _spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
         task = asyncio.create_task(coro)
