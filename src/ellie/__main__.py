@@ -58,9 +58,10 @@ async def main() -> None:
         async def publish(topic: str, payload: str, retain: bool) -> bool:
             return await bridge.publish(topic, payload, retain)
 
+        evidence = Evidence(MEDIA_ROOT)
         service = Service(
             store=store,
-            evidence=Evidence(MEDIA_ROOT),
+            evidence=evidence,
             reference=frames.ReferenceKeeper(MEDIA_ROOT / "reference", utcnow),
             tracker=VisitTracker(),
             analysers=analysers,
@@ -74,6 +75,9 @@ async def main() -> None:
             camera=options.camera,
             usd_to_eur=options.usd_to_eur,
             version=__version__,
+            download_clip=lambda event_id, visit_id: evidence.download_clip(
+                http, options.frigate_url, event_id, visit_id
+            ),
         )
         await service.recover()
 

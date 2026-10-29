@@ -1,8 +1,9 @@
 """Builds the one JSON object published to `ellie/state` (its shape is documented in discovery.py)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from ellie.accuracy import summarize
 from ellie.counting import LOCAL_TZ, Counting
 from ellie.evidence import Evidence
 from ellie.store import Store
@@ -39,7 +40,6 @@ def build_state(
     cfg: dict[str, Any],
     now: datetime,
     usd_to_eur: float,
-    accuracy: dict | None = None,
     pad: dict | None = None,
 ) -> dict[str, Any]:
     counting = Counting(store)
@@ -51,6 +51,13 @@ def build_state(
     month_start = now.astimezone(LOCAL_TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month = store.usage_since(iso(month_start))
     total = store.usage_since(BEGINNING)
+    window_days = 14
+    accuracy = summarize(
+        store.analysis_label_pairs(iso(now - timedelta(days=window_days))),
+        cfg["deciding_analyser"],
+        window_days,
+    )
+    corrected = store.corrected_ids(iso(now - timedelta(days=90)))
 
     return {
         "pee_today": summary["pees"],
@@ -92,8 +99,8 @@ def build_state(
                 for v in queue[:20]
             ],
         },
-        "daily_history": {"days": counting.history_days(now, days=90)},
-        "accuracy": accuracy or {"pct": None, "window_days": 14, "analysers": {}},
+        "daily_history": {"days": counting.history_days(now, days=90, corrected_ids=corrected)},
+        "accuracy": accuracy,
         "analysis_calls": {
             "calls": month["calls"],
             "tokens_in": month["tokens_in"],

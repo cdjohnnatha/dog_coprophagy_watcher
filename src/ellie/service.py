@@ -10,23 +10,24 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from ellie import discovery
 from ellie.analysers.base import Analyser, AnalyserError
-from ellie.counting import Counting
+from ellie.counting import LOCAL_TZ, Counting, local_date
 from ellie.decide import decide_visit
 from ellie.evidence import Evidence
 from ellie.frames import FrameError, ReferenceKeeper
 from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
 from ellie.state import build_state, local_text
 from ellie.store import Store
-from ellie.visits import Action, VisitTracker
+from ellie.visits import Action, VisitTracker, iso
 
 log = logging.getLogger(__name__)
 
 Publish = Callable[[str, str, bool], Awaitable[object]]
+LABEL_CHANNELS = ("notification", "dashboard")
 REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference frame is kept
 ALERT_EVERY_S = 6 * 3600
 
@@ -79,6 +80,7 @@ class Service:
         camera: str = "ellie",
         usd_to_eur: float = 0.9,
         version: str = "3.0.0",
+        download_clip: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self.store, self.evidence, self.reference, self.tracker = (
             store,
@@ -95,9 +97,16 @@ class Service:
             for key, default in RUNTIME_DEFAULTS.items()
         }
         self.tracker.merge_gap_s = self.cfg["merge_gap_s"]
-        self.commands: dict[str, Callable[[dict], Awaitable[None]]] = {}
+        self._download_clip = download_clip
+        self.commands: dict[str, Callable[[dict], Awaitable[None]]] = {
+            "label": self._cmd_label,
+            "manual_pee": self._cmd_manual_pee,
+            "reject_last": self._cmd_reject_last,
+            "reanalyse": self._cmd_reanalyse,
+        }
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
+        self._last_purge: date | None = None
 
     # --- MQTT entry points ---
 
@@ -141,6 +150,11 @@ class Service:
             except FrameError as exc:
                 log.warning("reference refresh failed: %s", exc)
         Counting(self.store).resolve_overdue_uncertain(now)
+        local = now.astimezone(LOCAL_TZ)
+        if (local.hour, local.minute) >= (3, 30) and self._last_purge != local.date():
+            self._last_purge = local.date()  # once a day, after 03:30 local
+            stats = await asyncio.to_thread(self.evidence.purge, now)
+            log.info("retention: %s", stats)
         await self.publish_state()
 
     async def recover(self) -> None:
@@ -188,6 +202,117 @@ class Service:
             log.warning("command %s: payload is not an object", name)
             return
         await handler(data)
+
+    # --- owner commands (contracts/mqtt.md) ---
+
+    async def _cmd_label(self, data: dict) -> None:
+        """`ellie/cmd/label`: the owner answers for one visit (notification or dashboard)."""
+        visit_id, label = data.get("visit_id"), data.get("label")
+        channel = data.get("channel", "dashboard")
+        visit = self.store.get_visit(visit_id) if isinstance(visit_id, str) else None
+        if visit is None or label not in ("pee", "no_pee") or channel not in LABEL_CHANNELS:
+            log.warning("ignored label command %r", {k: data.get(k) for k in ("visit_id", "label")})
+            return
+        await self._apply_label(visit, label, channel, data.get("by"))
+
+    async def _cmd_manual_pee(self, data: dict) -> None:
+        """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
+        try:
+            at = datetime.fromisoformat(str(data.get("at")))
+        except ValueError:
+            log.warning("manual_pee: invalid time %r", data.get("at"))
+            return
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=LOCAL_TZ)
+        if at > self._clock() + timedelta(minutes=5):
+            log.warning("manual_pee: time is in the future")
+            return
+        stamp = at.astimezone(LOCAL_TZ)
+        visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        while self.store.get_visit(visit_id):
+            stamp += timedelta(seconds=1)
+            visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        self.store.insert_visit(
+            {
+                "id": visit_id,
+                "source": "manual",
+                "started_at": iso(at),
+                "ended_at": iso(at),
+                "entries": 1,
+                "person_present": False,
+                "frigate_event_ids": [],
+                "state": "LABELLED",
+                "final_outcome": "pee",
+                "poop_observed": "none",
+                "reason": "adicionado manualmente",
+                "needs_review": False,
+            }
+        )
+        self.store.insert_label(visit_id, "pee", "manual_add", data.get("by"), None)
+        await self._visit_decided(visit_id, None)
+
+    async def _cmd_reject_last(self, data: dict) -> None:
+        """`ellie/cmd/reject_last`: undo the most recent pee counted today."""
+        now = self._clock()
+        last = Counting(self.store).last_pee(now, lookback_days=2)
+        if last is None or local_date(last["started_at"]) != local_date(iso(now)):
+            log.warning("reject_last: no counted pee today")
+            return
+        await self._apply_label(last, "no_pee", "reject_last", data.get("by"))
+
+    async def _cmd_reanalyse(self, data: dict) -> None:
+        """`ellie/cmd/reanalyse`: run the deciding analyser again on the stored images."""
+        visit = self.store.get_visit(data.get("visit_id")) if data.get("visit_id") else None
+        if visit is None:
+            log.warning("reanalyse: unknown visit")
+            return
+        directory = self.evidence.visit_dir(visit["id"])
+        if not (directory / "before.jpg").exists() or not (directory / "after.jpg").exists():
+            log.warning("reanalyse %s: the stored images are missing", visit["id"])
+            return
+        failed = visit["final_outcome"] == "unknown" and not self.store.labels_for(visit["id"])
+        if failed:  # never decided: this is a retry
+            self.store.update_visit(visit["id"], state="ANALYSING")
+            self._spawn(self._analyse(visit["id"], retry=True))
+        else:  # already decided or labelled: record the new answer, change nothing else
+            self._spawn(self._rerun(visit["id"]))
+
+    async def _apply_label(self, visit: dict, label: str, channel: str, by: str | None) -> None:
+        visit_id = visit["id"]
+        self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"])
+        self.store.update_visit(visit_id, final_outcome=label, needs_review=False, state="LABELLED")
+        visit = self.store.get_visit(visit_id)
+        analyses = self.store.analyses_for(visit_id)
+        night = ((analyses[-1]["result"] or {}).get("night_mode")) if analyses else None
+        try:
+            self.evidence.export_dataset(visit, label, night=night)
+        except OSError:
+            log.exception("dataset export failed for %s", visit_id)
+        await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
+        await self._visit_decided(visit_id, None)
+
+    async def _rerun(self, visit_id: str) -> None:
+        analyser = self.analysers.get(self.cfg["deciding_analyser"])
+        directory = self.evidence.visit_dir(visit_id)
+        if analyser is None:
+            return
+        during = directory / "during.jpg"
+        started = time.monotonic()
+        try:
+            result = await analyser.analyse(
+                (directory / "before.jpg").read_bytes(),
+                (directory / "after.jpg").read_bytes(),
+                during.read_bytes() if during.exists() else None,
+            )
+        except AnalyserError as exc:
+            log.warning("reanalyse %s failed: %s", visit_id, exc)
+            return
+        outcome = decide_visit(result, self.cfg["confidence_threshold"])
+        self.store.insert_analysis(
+            visit_id, analyser.id, "shadow", result.model_dump(exclude_none=True), outcome,
+            int((time.monotonic() - started) * 1000), None, getattr(analyser, "last_usage", None),
+        )  # fmt: skip
+        await self._visit_decided(visit_id, None)
 
     # --- visit flow ---
 
@@ -274,6 +399,8 @@ class Service:
             needs_review=(not decided) or bool(self.cfg["validation_mode"]),
             deciding_analyser=analyser.id,
         )
+        if result.poop != "none" and events and self._download_clip:
+            self._spawn(self._download_clip(events[0], visit_id))  # raw material for spec 004/005
         await self._visit_decided(visit_id, "uncertain" if outcome == "uncertain" else None)
 
     def _reason_for(self, error: str) -> str:

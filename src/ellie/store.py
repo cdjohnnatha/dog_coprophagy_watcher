@@ -52,6 +52,21 @@ MIGRATIONS: list[str] = [
     """,
     # 2: seconds she stood on the pad itself (zone tray_pad), kept as evidence
     "ALTER TABLE visits ADD COLUMN on_pad_s REAL;",
+    # 3: the owner's answers; the latest label of a visit decides its final outcome
+    """
+    CREATE TABLE labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        visit_id TEXT NOT NULL REFERENCES visits(id),
+        label TEXT NOT NULL CHECK (label IN ('pee', 'no_pee')),
+        channel TEXT NOT NULL
+            CHECK (channel IN ('notification', 'dashboard', 'manual_add', 'reject_last')),
+        labelled_by TEXT,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        previous_final_outcome TEXT
+            CHECK (previous_final_outcome IN ('pee', 'no_pee', 'unknown'))
+    );
+    CREATE INDEX idx_labels_visit ON labels(visit_id);
+    """,
 ]
 
 _VISIT_COLUMNS = (
@@ -192,6 +207,53 @@ class Store:
             (start_iso,),
         ).fetchone()
         return {k: int(row[k]) for k in ("calls", "tokens_in", "tokens_out")}
+
+    def insert_label(
+        self,
+        visit_id: str,
+        label: str,
+        channel: str,
+        by: str | None = None,
+        previous_final_outcome: str | None = None,
+    ) -> int:
+        with self._db:
+            cur = self._db.execute(
+                "INSERT INTO labels (visit_id, label, channel, labelled_by, previous_final_outcome)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (visit_id, label, channel, by, previous_final_outcome),
+            )
+        return int(cur.lastrowid)
+
+    def labels_for(self, visit_id: str) -> list[dict]:
+        rows = self._db.execute("SELECT * FROM labels WHERE visit_id = ? ORDER BY id", (visit_id,))
+        return [dict(r) for r in rows]
+
+    def corrected_ids(self, start_iso: str) -> set[str]:
+        """Visits since `start_iso` whose latest label differs from the automatic outcome."""
+        rows = self._db.execute(
+            "SELECT v.id FROM visits v JOIN labels l ON l.visit_id = v.id"
+            " AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
+            " WHERE v.started_at >= ? AND (v.auto_outcome IS NULL OR v.auto_outcome != l.label)",
+            (start_iso,),
+        )
+        return {r["id"] for r in rows}
+
+    def analysis_label_pairs(self, since_iso: str) -> list[dict]:
+        """One row per (labelled visit, analyser): the analyser's latest outcome and the owner's
+        latest label. Labelled visits without any analysis (manual entries) have analyser None."""
+        rows = self._db.execute(
+            "SELECT v.id AS visit_id, v.source, v.auto_outcome, l.label,"
+            " a.analyser, a.role, a.outcome"
+            " FROM visits v"
+            " JOIN labels l ON l.visit_id = v.id"
+            "  AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
+            " LEFT JOIN analyses a ON a.visit_id = v.id"
+            "  AND a.id = (SELECT MAX(id) FROM analyses WHERE visit_id = v.id"
+            "              AND analyser = a.analyser)"
+            " WHERE v.started_at >= ? ORDER BY v.started_at",
+            (since_iso,),
+        )
+        return [dict(r) for r in rows]
 
     def insert_analysis(
         self,
