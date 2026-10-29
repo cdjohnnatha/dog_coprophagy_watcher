@@ -25,6 +25,9 @@ IDS = {
     "sensor.ellie_pad_changed_at",
     "sensor.ellie_pad_change_due",
     "number.ellie_pad_change_days",
+    "image.ellie_last_pee_photo",
+    "image.ellie_review_before",
+    "image.ellie_review_after",
 }
 ABBREV = {
     "dev",
@@ -78,7 +81,13 @@ FULL = {
         "window_days": 30,
         "analysers": {"gemini": {"labelled": 10, "agree": 9, "accuracy": 0.9}},
     },
-    "analysis_calls": {"calls": 12, "tokens_in": 100, "tokens_out": 50, "estimated_cost_eur": 0.5},
+    "analysis_calls": {
+        "calls": 12,
+        "tokens_in": 100,
+        "tokens_out": 50,
+        "estimated_cost_eur": 0.5,
+        "estimated_cost_eur_total": 1.5,
+    },
     "settings": {
         "confidence_threshold": 0.8,
         "merge_gap_s": 60,
@@ -127,8 +136,12 @@ def test_unique_ids_and_topics() -> None:
 
 def test_common_keys_and_no_abbreviations() -> None:
     for _, p in MSGS:
-        for key in ("device", "availability_topic", "state_topic", "origin", "name"):
+        for key in ("device", "availability_topic", "origin", "name"):
             assert key in p
+        if p["default_entity_id"].startswith("image."):  # bytes come from image_topic
+            assert p["image_topic"].startswith("ellie/image/") and "state_topic" not in p
+        else:
+            assert "state_topic" in p
         assert p["origin"]["sw_version"] == "1.2.3"
         assert not ABBREV & set(p)
         json.dumps(p)

@@ -28,7 +28,8 @@ def build(tmp_path, clock, analyser=None, **overrides):
     published: list[tuple[str, object, bool]] = []
 
     async def publish(topic, payload, retain):
-        body = json.loads(payload) if payload.startswith(("{", "[")) else payload
+        is_json = isinstance(payload, str) and payload.startswith(("{", "["))
+        body = json.loads(payload) if is_json else payload
         published.append((topic, body, retain))
 
     async def fetch_frame():
@@ -284,7 +285,7 @@ async def test_validation_mode_off_does_not_flag_confident_visits(rig):
 async def test_connecting_publishes_discovery_and_state(rig):
     await rig.service.on_connect()
     configs = [(t, r) for t, _, r in rig.published if t.startswith("homeassistant/")]
-    assert len(configs) == 15 and all(retained for _, retained in configs)
+    assert len(configs) == 18 and all(retained for _, retained in configs)
     state = [(b, r) for t, b, r in rig.published if t == "ellie/state"][-1]
     assert state[1] is True and state[0]["pee_today"] == 0
     assert {

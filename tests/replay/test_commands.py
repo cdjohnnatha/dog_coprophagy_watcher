@@ -242,3 +242,20 @@ async def test_a_visit_started_by_a_person_only_never_becomes_a_pee(rig):
     await advance(rig, 120)
     assert visits(rig) == [] and rig.analyser.calls == []
     assert rig.clock() - timedelta(minutes=5) < rig.clock()
+
+
+async def test_photos_go_to_the_image_entities_only_when_they_change(rig):
+    visit_id = await uncertain_visit(rig)
+    directory = rig.evidence.visit_dir(visit_id)
+    sent = {t: (b, r) for t, b, r in rig.published if t.startswith("ellie/image/")}
+    assert sent["ellie/image/review_before"] == ((directory / "before.jpg").read_bytes(), True)
+    assert sent["ellie/image/review_after"] == ((directory / "after.jpg").read_bytes(), True)
+    assert "ellie/image/last_pee" not in sent  # an uncertain visit is not a counted pee
+
+    count = len([t for t, *_ in rig.published if t.startswith("ellie/image/")])
+    await rig.service.minute_tasks()
+    await rig.service.minute_tasks()
+    assert len([t for t, *_ in rig.published if t.startswith("ellie/image/")]) == count
+
+    await command(rig, "label", visit_id=visit_id, label="pee", channel="dashboard")
+    assert topics(rig, "ellie/image/last_pee")[-1] == (directory / "after.jpg").read_bytes()

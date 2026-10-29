@@ -76,6 +76,25 @@ class FakeAnalyser:
         self.delay_s = delay_s
         self._results = list(results or [])
         self.calls: list[dict[str, int | None]] = []
+        self._pad_results: list[PadChangeResult | Exception] = []
+        self.pad_calls: list[dict[str, int]] = []
+
+    def script_pad(self, *results: PadChangeResult | Exception) -> None:
+        """Queue answers for `analyse_pad` (the last one keeps repeating)."""
+        self._pad_results = list(results)
+
+    async def analyse_pad(self, before: bytes, after: bytes) -> PadChangeResult:
+        self.pad_calls.append({"before_len": len(before), "after_len": len(after)})
+        if not self._pad_results:
+            item: PadChangeResult | Exception = make_pad_result()
+        elif len(self._pad_results) > 1:
+            item = self._pad_results.pop(0)
+        else:
+            item = self._pad_results[0]
+        await asyncio.sleep(self.delay_s)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def script(self, *results: AnalysisResult | Exception) -> None:
         """Replace the queued results (the last one keeps repeating)."""

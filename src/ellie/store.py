@@ -67,6 +67,33 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_labels_visit ON labels(visit_id);
     """,
+    # 4: person presences at the tray and the pad changes derived from them (US7)
+    """
+    CREATE TABLE presences (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        state TEXT NOT NULL CHECK (state IN ('PRESENT', 'ANALYSING', 'DECIDED')),
+        auto_outcome TEXT
+            CHECK (auto_outcome IN ('replaced', 'not_replaced', 'uncertain', 'unknown')),
+        final_outcome TEXT CHECK (final_outcome IN ('replaced', 'not_replaced', 'unknown')),
+        poop_removed INTEGER,
+        reason TEXT,
+        analysis TEXT,
+        cost_units TEXT,
+        needs_review INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE pad_changes (
+        id TEXT PRIMARY KEY,
+        at TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('detected', 'confirmed', 'visit', 'manual')),
+        presence_id TEXT REFERENCES presences(id),
+        visit_id TEXT REFERENCES visits(id),
+        pad_color TEXT,
+        undone_at TEXT
+    );
+    CREATE INDEX idx_pad_changes_at ON pad_changes(at);
+    """,
 ]
 
 _VISIT_COLUMNS = (
@@ -87,8 +114,22 @@ _VISIT_COLUMNS = (
     "deciding_analyser",
     "on_pad_s",
 )
-_BOOL_FIELDS = ("person_present", "needs_review")
-_JSON_FIELDS = ("frigate_event_ids",)
+_PRESENCE_COLUMNS = (
+    "id",
+    "started_at",
+    "ended_at",
+    "state",
+    "auto_outcome",
+    "final_outcome",
+    "poop_removed",
+    "reason",
+    "analysis",
+    "cost_units",
+    "needs_review",
+)
+_PAD_CHANGE_COLUMNS = ("id", "at", "source", "presence_id", "visit_id", "pad_color", "undone_at")
+_BOOL_FIELDS = ("person_present", "needs_review", "poop_removed")
+_JSON_FIELDS = ("frigate_event_ids", "analysis", "cost_units")
 
 
 def _encode(field: str, value: Any) -> Any:
@@ -101,12 +142,11 @@ def _encode(field: str, value: Any) -> Any:
 
 def _visit_from_row(row: sqlite3.Row) -> dict:
     visit = dict(row)
-    for field in _BOOL_FIELDS:
+    for field in ("person_present", "needs_review"):
         if visit[field] is not None:
             visit[field] = bool(visit[field])
-    for field in _JSON_FIELDS:
-        if visit[field] is not None:
-            visit[field] = json.loads(visit[field])
+    if visit["frigate_event_ids"] is not None:
+        visit["frigate_event_ids"] = json.loads(visit["frigate_event_ids"])
     return visit
 
 
@@ -198,15 +238,93 @@ class Store:
         return None if row is None else _visit_from_row(row)
 
     def usage_since(self, start_iso: str) -> dict:
-        """Billed analysis calls and tokens since `start_iso` (cost_units holds in/out tokens)."""
+        """Billed analysis calls (visits and presences) and tokens since `start_iso`."""
         row = self._db.execute(
             "SELECT COUNT(*) AS calls,"
-            " COALESCE(SUM(json_extract(cost_units, '$.in')), 0) AS tokens_in,"
-            " COALESCE(SUM(json_extract(cost_units, '$.out')), 0) AS tokens_out"
-            " FROM analyses WHERE created_at >= ? AND cost_units IS NOT NULL",
+            " COALESCE(SUM(json_extract(cu, '$.in')), 0) AS tokens_in,"
+            " COALESCE(SUM(json_extract(cu, '$.out')), 0) AS tokens_out FROM ("
+            " SELECT created_at AS at, cost_units AS cu FROM analyses WHERE cost_units IS NOT NULL"
+            " UNION ALL"
+            " SELECT started_at AS at, cost_units AS cu FROM presences WHERE cost_units IS NOT NULL"
+            ") WHERE at >= ?",
             (start_iso,),
         ).fetchone()
         return {k: int(row[k]) for k in ("calls", "tokens_in", "tokens_out")}
+
+    def _insert(self, table: str, columns: tuple[str, ...], row: dict) -> None:
+        unknown = set(row) - set(columns)
+        if unknown:
+            raise ValueError(f"unknown {table} fields: {sorted(unknown)}")
+        names = list(row)
+        sql = f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})"
+        with self._db:
+            self._db.execute(sql, [_encode(c, row[c]) for c in names])
+
+    def _update(self, table: str, columns: tuple[str, ...], key: str, fields: dict) -> None:
+        unknown = set(fields) - set(columns) | ({"id"} & set(fields))
+        if unknown or not fields:
+            raise ValueError(f"unknown or immutable {table} fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{c} = ?" for c in fields)
+        sql = f"UPDATE {table} SET {assignments} WHERE id = ?"
+        with self._db:
+            cur = self._db.execute(sql, [*(_encode(c, v) for c, v in fields.items()), key])
+        if cur.rowcount == 0:
+            raise KeyError(key)
+
+    @staticmethod
+    def _decoded(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        item = dict(row)
+        for field in _BOOL_FIELDS:
+            if item.get(field) is not None:
+                item[field] = bool(item[field])
+        for field in _JSON_FIELDS:
+            if item.get(field) is not None:
+                item[field] = json.loads(item[field])
+        return item
+
+    def insert_presence(self, presence: dict) -> None:
+        self._insert("presences", _PRESENCE_COLUMNS, presence)
+
+    def update_presence(self, presence_id: str, **fields: Any) -> None:
+        self._update("presences", _PRESENCE_COLUMNS, presence_id, fields)
+
+    def get_presence(self, presence_id: str) -> dict | None:
+        row = self._db.execute("SELECT * FROM presences WHERE id = ?", (presence_id,)).fetchone()
+        return self._decoded(row)
+
+    def analysing_presences(self) -> list[dict]:
+        rows = self._db.execute("SELECT * FROM presences WHERE state IN ('PRESENT', 'ANALYSING')")
+        return [self._decoded(r) for r in rows]
+
+    def insert_pad_change(self, change: dict) -> None:
+        self._insert("pad_changes", _PAD_CHANGE_COLUMNS, change)
+
+    def pad_changes(self, limit: int = 10) -> list[dict]:
+        """Newest first, undone ones included (the history keeps both, US7-6)."""
+        rows = self._db.execute("SELECT * FROM pad_changes ORDER BY at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def current_pad_change(self) -> dict | None:
+        row = self._db.execute(
+            "SELECT * FROM pad_changes WHERE undone_at IS NULL ORDER BY at DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def undo_current_pad_change(self, undone_at: str) -> dict | None:
+        current = self.current_pad_change()
+        if current is None:
+            return None
+        self._update("pad_changes", _PAD_CHANGE_COLUMNS, current["id"], {"undone_at": undone_at})
+        return {**current, "undone_at": undone_at}
+
+    def pees_since(self, start_iso: str) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM visits WHERE final_outcome = 'pee' AND started_at >= ?",
+            (start_iso,),
+        ).fetchone()
+        return int(row["n"])
 
     def insert_label(
         self,

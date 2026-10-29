@@ -10,13 +10,16 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
     daily_history: {days: [{date, pees, visits, corrected}]},
     accuracy: {pct: float|null, window_days: int,
                analysers: {id: {labelled, agree, accuracy}}},
-    analysis_calls: {calls: int, tokens_in: int, tokens_out: int, estimated_cost_eur: float},
+    analysis_calls: {calls: int, tokens_in: int, tokens_out: int, estimated_cost_eur: float,
+                     estimated_cost_eur_total: float},
     settings: {confidence_threshold: float, merge_gap_s: int, deciding_analyser: str,
                validation_mode: bool, pad_change_days: int},
     pad: null | {changed_at, due_at | null, source, days_in_use: float, pees_since: int,
                  pad_color: str | null, image: str | null, history: [...]}
 
 Commands arrive on ``ellie/set/<setting>``; availability on ``ellie/status``.
+Three image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
+them with its own auth, which a plain /media/local URL in a dashboard card cannot do.
 """
 
 from collections.abc import Sequence
@@ -28,6 +31,11 @@ DISCOVERY_PREFIX = "homeassistant"
 STATE_TOPIC = "ellie/state"
 STATUS_TOPIC = "ellie/status"
 SET_TOPIC_PREFIX = "ellie/set"
+IMAGE_TOPICS = {
+    "last_pee_photo": "ellie/image/last_pee",
+    "review_before": "ellie/image/review_before",
+    "review_after": "ellie/image/review_after",
+}
 DEVICE: dict[str, Any] = {
     "identifiers": ["ellie_v3"],
     "name": "Ellie",
@@ -161,6 +169,7 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                     tokens_in="value_json.analysis_calls.tokens_in",
                     tokens_out="value_json.analysis_calls.tokens_out",
                     estimated_cost_eur="value_json.analysis_calls.estimated_cost_eur",
+                    estimated_cost_eur_total="value_json.analysis_calls.estimated_cost_eur_total",
                 ),
             },
         ),
@@ -257,6 +266,18 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 **cmd("pad_change_days"),
             },
         ),
+        *[
+            (
+                "image",
+                obj,
+                {"name": name, "image_topic": IMAGE_TOPICS[obj], "content_type": "image/jpeg"},
+            )
+            for obj, name in (
+                ("last_pee_photo", "Foto do último xixi"),
+                ("review_before", "Revisão: foto antes"),
+                ("review_after", "Revisão: foto depois"),
+            )
+        ],
     ]
 
 
@@ -276,8 +297,9 @@ def discovery_messages(version: str, analysers: Sequence[str]) -> list[tuple[str
             "device": DEVICE,
             "origin": {"name": "Ellie", "sw_version": version},
             "availability_topic": STATUS_TOPIC,
-            "state_topic": STATE_TOPIC,
         }
+        if component != "image":  # image entities read bytes from image_topic instead
+            payload["state_topic"] = STATE_TOPIC
         payload.update({k: v for k, v in extra.items() if k != "name"})
         messages.append((_topic(component, unique_id), payload))
     return messages

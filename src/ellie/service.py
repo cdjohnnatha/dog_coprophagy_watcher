@@ -19,6 +19,8 @@ from ellie.counting import LOCAL_TZ, Counting, local_date
 from ellie.decide import decide_visit
 from ellie.evidence import Evidence
 from ellie.frames import FrameError, ReferenceKeeper
+from ellie.pads import PresenceTracker
+from ellie.pads_flow import PadsMixin
 from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
 from ellie.state import build_state, local_text
 from ellie.store import Store
@@ -26,7 +28,7 @@ from ellie.visits import Action, VisitTracker, iso
 
 log = logging.getLogger(__name__)
 
-Publish = Callable[[str, str, bool], Awaitable[object]]
+Publish = Callable[[str, str | bytes, bool], Awaitable[object]]
 LABEL_CHANNELS = ("notification", "dashboard")
 REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference frame is kept
 ALERT_EVERY_S = 6 * 3600
@@ -63,7 +65,7 @@ FIXABLE = {
 }
 
 
-class Service:
+class Service(PadsMixin):
     def __init__(
         self,
         *,
@@ -81,6 +83,7 @@ class Service:
         usd_to_eur: float = 0.9,
         version: str = "3.0.0",
         download_clip: Callable[[str, str], Awaitable[bool]] | None = None,
+        presence: PresenceTracker | None = None,
     ) -> None:
         self.store, self.evidence, self.reference, self.tracker = (
             store,
@@ -98,15 +101,20 @@ class Service:
         }
         self.tracker.merge_gap_s = self.cfg["merge_gap_s"]
         self._download_clip = download_clip
+        self.presence = presence or PresenceTracker()
         self.commands: dict[str, Callable[[dict], Awaitable[None]]] = {
             "label": self._cmd_label,
             "manual_pee": self._cmd_manual_pee,
             "reject_last": self._cmd_reject_last,
             "reanalyse": self._cmd_reanalyse,
+            "pad_label": self._cmd_pad_label,
+            "pad_changed": self._cmd_pad_changed,
+            "pad_undo": self._cmd_pad_undo,
         }
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
         self._last_purge: date | None = None
+        self._image_keys: dict[str, str] = {}
 
     # --- MQTT entry points ---
 
@@ -120,12 +128,15 @@ class Service:
     async def on_message(self, topic: str, payload: bytes) -> None:
         now = self._clock()
         actions: list[Action] = []
+        presence_actions = self._sync_presence(now)
         if topic == "frigate/pad_zone/dog":
             actions = self._count(payload, lambda n: self.tracker.on_pad_dog(n, now))
         elif topic == "frigate/tray_area/dog":
             actions = self._count(payload, lambda n: self.tracker.on_tray_dog(n, now))
+            self._count(payload, lambda n: self.presence.on_dog_area(n, now))
         elif topic == "frigate/tray_area/person":
             actions = self._count(payload, lambda n: self.tracker.on_tray_person(n, now))
+            presence_actions += self._count(payload, lambda n: self.presence.on_person(n, now))
         elif topic == "frigate/tray_pad/dog":
             actions = self._count(payload, lambda n: self.tracker.on_tray_pad_dog(n, now))
         elif topic == "frigate/events":
@@ -138,9 +149,13 @@ class Service:
         elif topic.startswith("ellie/cmd/"):
             await self.on_command(topic.removeprefix("ellie/cmd/"), payload)
         await self._apply(actions)
+        presence_actions += self._sync_presence(now)  # a visit may have just started
+        await self._apply_presence(presence_actions)
 
     async def tick(self) -> None:
-        await self._apply(self.tracker.tick(self._clock()))
+        now = self._clock()
+        await self._apply(self.tracker.tick(now))
+        await self._apply_presence(self._sync_presence(now) + self.presence.tick(now))
 
     async def minute_tasks(self) -> None:
         now = self._clock()
@@ -166,6 +181,12 @@ class Service:
                 self._spawn(self._analyse(visit["id"], retry=True))
             else:
                 await self._fail(visit["id"], "restart")
+        for presence in self.store.analysing_presences():
+            retryable = presence["state"] == "ANALYSING"
+            if retryable and (self.evidence.presence_dir(presence["id"]) / "after.jpg").exists():
+                self._spawn(self._analyse_presence(presence["id"], retry=True))
+            else:  # we lost track of this person: nothing to judge
+                self.store.update_presence(presence["id"], state="DECIDED", reason="restart")
 
     async def wait_idle(self) -> None:
         while self._tasks:
@@ -399,9 +420,24 @@ class Service:
             needs_review=(not decided) or bool(self.cfg["validation_mode"]),
             deciding_analyser=analyser.id,
         )
+        visit = self.store.get_visit(visit_id)
+        if (
+            result.pad_replaced and visit["person_present"]
+        ):  # a person was there: the pad was swapped
+            await self._record_pad_change(
+                "visit", visit["ended_at"] or visit["started_at"], visit_id=visit_id
+            )
         if result.poop != "none" and events and self._download_clip:
             self._spawn(self._download_clip(events[0], visit_id))  # raw material for spec 004/005
         await self._visit_decided(visit_id, "uncertain" if outcome == "uncertain" else None)
+
+    @staticmethod
+    def _reason_text(code: str) -> str:
+        return REASONS.get(code, REASONS["analysis_failed"])
+
+    @staticmethod
+    def _fixable() -> dict:
+        return FIXABLE
 
     def _reason_for(self, error: str) -> str:
         for marker, (code, _title, _message) in FIXABLE.items():
@@ -469,10 +505,30 @@ class Service:
             cfg=self.cfg,
             now=self._clock(),
             usd_to_eur=self.usd_to_eur,
+            pad=self.pad_state(self._clock()),
         )
         await self._publish(discovery.STATE_TOPIC, json.dumps(state, ensure_ascii=False), True)
+        await self._publish_images(state)
 
-    async def _publish(self, topic: str, payload: str, retain: bool) -> None:
+    async def _publish_images(self, state: dict) -> None:
+        """Send a photo to its image entity only when it changed (a few hundred KB, retained)."""
+        topics = discovery.IMAGE_TOPICS
+        last = state["last_pee"]
+        current = (state["review_queue"]["items"] or [None])[0]
+        wanted = {
+            topics["last_pee_photo"]: (last and last["visit_id"], "after.jpg"),
+            topics["review_before"]: (current and current["visit_id"], "before.jpg"),
+            topics["review_after"]: (current and current["visit_id"], "after.jpg"),
+        }
+        for topic, (visit_id, name) in wanted.items():
+            if not visit_id or self._image_keys.get(topic) == visit_id:
+                continue
+            path = self.evidence.visit_dir(visit_id) / name
+            if path.exists():
+                self._image_keys[topic] = visit_id
+                await self._publish(topic, path.read_bytes(), True)
+
+    async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> None:
         await self._publish_fn(topic, payload, retain)
 
     def _spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
