@@ -21,10 +21,8 @@ class Settings(BaseSettings):
     frigate_public_url: str = Field(default="", alias="FRIGATE_PUBLIC_URL")
     camera_name: str = Field(default="dog", alias="CAMERA_NAME")
     toilet_zone: str = Field(default="poop_zone", alias="TOILET_ZONE")
-    
-    # Squat Detection Thresholds
-    squat_score_thresh: float = Field(default=0.65, alias="SQUAT_SCORE_THRESH")
-    squat_min_duration_s: float = Field(default=5.0, alias="SQUAT_MIN_DURATION_S")
+    proper_zone: str = Field(default="", alias="PROPER_ZONE")
+    monitor_all_zones: bool = Field(default=True, alias="MONITOR_ALL_ZONES")
     
     # Residue Confirmation
     residue_confirm_window_s: float = Field(default=20.0, alias="RESIDUE_CONFIRM_WINDOW_S")
@@ -37,11 +35,42 @@ class Settings(BaseSettings):
     
     # Debug
     enable_debug_watcher: bool = Field(default=False, alias="ENABLE_DEBUG_WATCHER")
+
+    # Persistence (add-on /data is a persistent volume)
+    state_store_path: str = Field(default="/data/ellie_watcher_state.json", alias="STATE_STORE_PATH")
+    pad_ref_image_path: str = Field(default="/data/pad_clean_ref.jpg", alias="PAD_REF_IMAGE_PATH")
+    evidence_enabled: bool = Field(default=True, alias="EVIDENCE_ENABLED")
+    evidence_dir: str = Field(default="/data/evidence", alias="EVIDENCE_DIR")
+
+    # Pad reference capture heuristics (used to detect pad replacement/reset).
+    pad_ref_person_window_s: float = Field(default=180.0, alias="PAD_REF_PERSON_WINDOW_S")
+    pad_ref_dog_absent_s: float = Field(default=5.0, alias="PAD_REF_DOG_ABSENT_S")
+
+    # Pee Detection (confirmation after squat ends)
+    pee_enabled: bool = Field(default=True, alias="PEE_ENABLED")
+    pee_confirm_window_s: float = Field(default=25.0, alias="PEE_CONFIRM_WINDOW_S")
+    pee_min_area: int = Field(default=220, alias="PEE_MIN_AREA")
+    pee_static_sec: float = Field(default=1.0, alias="PEE_STATIC_SEC")
+    pee_delta_l_min: int = Field(default=10, alias="PEE_DELTA_L_MIN")
+    # Pee can also show up as yellowing on white pads (b* in LAB), and in some
+    # lighting conditions as brightening/specular highlights.
+    pee_delta_l_bright_min: int = Field(default=12, alias="PEE_DELTA_L_BRIGHT_MIN")
+    pee_delta_b_min: int = Field(default=10, alias="PEE_DELTA_B_MIN")
+    # Integrated wetness change threshold to detect pee-on-pee even if area grows little.
+    pee_mass_min: int = Field(default=1200, alias="PEE_MASS_MIN")
+    # Optional secondary gate: compare with last confirmed pee image to validate
+    # an incremental increase (e.g. count 2 -> 3).
+    pee_increment_enabled: bool = Field(default=True, alias="PEE_INCREMENT_ENABLED")
+    pee_increment_mass_min: int = Field(default=500, alias="PEE_INCREMENT_MASS_MIN")
+    last_image_max_age_s: float = Field(default=240.0, alias="LAST_IMAGE_MAX_AGE_S")
     
     # Episode Management
     ep_cooldown_s: float = Field(default=180.0, alias="EP_COOLDOWN_S")
-    leave_timeout_s: float = Field(default=8.0, alias="LEAVE_TIMEOUT_S")
     merge_radius_px: int = Field(default=90, alias="MERGE_RADIUS_PX")
+
+    # Pee episode de-dup (pee can happen multiple times close together)
+    pee_cooldown_s: float = Field(default=45.0, alias="PEE_COOLDOWN_S")
+    pee_merge_radius_px: int = Field(default=70, alias="PEE_MERGE_RADIUS_PX")
     
     # Anti-Pee / Shape Filtering
     min_blob_w: int = Field(default=14, alias="MIN_BLOB_W")
@@ -53,31 +82,8 @@ class Settings(BaseSettings):
     tex_min_mono: float = Field(default=25.0, alias="TEX_MIN_MONO")
     spec_max_mono: float = Field(default=0.18, alias="SPEC_MAX_MONO")
     
-    # Still Position Detection
-    motionless_min: int = Field(default=3, alias="MOTIONLESS_MIN")
-    speed_max_still: float = Field(default=0.15, alias="SPEED_MAX_STILL")
-    
-    # Frigate Event Labels
+    # Frigate sub-label (optional; used only if you want to tag dog events as poop/pee)
     frigate_event_poop_sub_label: str = Field(default="poop", alias="FRIGATE_EVENT_POOP_SUB_LABEL")
-    frigate_event_coprophagy_sub_label: str = Field(default="coprophagy", alias="FRIGATE_EVENT_COPROPHAGY_SUB_LABEL")
-    
-    # Coprophagy Detection
-    near_radius_px: int = Field(default=80, alias="NEAR_RADIUS_PX")
-    risk_dur_s: float = Field(default=8.0, alias="RISK_DUR_S")
-    leave_near_gap_s: float = Field(default=2.0, alias="LEAVE_NEAR_GAP_S")
-    copro_drop_frac: float = Field(default=0.50, alias="COPRO_DROP_FRAC")
-    cum_drop_frac: float = Field(default=0.70, alias="CUM_DROP_FRAC")
-    cum_window_s: float = Field(default=900.0, alias="CUM_WINDOW_S")
-    area_post_leave_s: float = Field(default=3.0, alias="AREA_POST_LEAVE_S")
-    ignore_sat_night: bool = Field(default=True, alias="IGNORE_SAT_NIGHT")
-
-    # ML Configuration
-    ml_enabled: bool = True
-    poop_model_path: str = "/data/models/poop_residue_mnv3.tflite"
-    copro_model_path: str = "/data/models/copro_pair_mnv3.tflite"
-    poop_thresh: float = 0.65        # p_poop minimum to confirm residue
-    copro_thresh: float = 0.70       # p_eaten minimum to confirm coprophagia
-    copro_area_drop_min: float = 0.20  # it is required to drop >= 20% (robustness)
     
     class Config:
         env_file = ".env"
@@ -88,6 +94,11 @@ class Settings(BaseSettings):
     def fr_public(self) -> str:
         """Public Frigate URL, falls back to base URL."""
         return self.frigate_public_url or self.frigate_base_url
+
+    @property
+    def proper_zone_name(self) -> str:
+        """Zone that represents the proper elimination area (pad zone)."""
+        return self.proper_zone or self.toilet_zone
     
     def get_topic(self, name: str) -> str:
         """Get MQTT topic by name."""
@@ -96,10 +107,12 @@ class Settings(BaseSettings):
             "state": "home/ellie/state",
             "poop": "home/ellie/poop_present",
             "poop_event": "home/ellie/poop_event",
-            "copro_risk": "home/ellie/coprophagy_risk",
-            "copro_event": "home/ellie/coprophagy_event",
+            "elimination_start": "home/ellie/elimination_start",
+            "elimination_event": "home/ellie/elimination_event",
+            "elimination_stats": "home/ellie/elimination_stats",
             "health": "home/ellie/health",
             "debug_log": "home/ellie/debug/log",
+            "increment_gate": "home/ellie/debug/increment_gate",
         }
         return topics.get(name, f"home/ellie/{name}")
 

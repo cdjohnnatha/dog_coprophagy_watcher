@@ -2,8 +2,7 @@
 MQTT message handlers - Transform MQTT messages into service calls.
 """
 import json
-from typing import Optional
-from domain.models import DogDetection, BBox
+from domain.models import FrigateEventUpdate
 
 
 class MQTTHandlers:
@@ -50,8 +49,11 @@ class MQTTHandlers:
         
         # Extract event data
         after = data.get("after", {}) or {}
-        label = after.get("label")
-        cam = after.get("camera")
+        before = data.get("before", {}) or {}
+        evt_type = str(data.get("type") or "")
+        label = str(after.get("label") or "")
+        cam = str(after.get("camera") or "")
+        event_id = str(after.get("id") or "")
         
         # Filter by camera
         if cam != self.settings.camera_name:
@@ -61,85 +63,57 @@ class MQTTHandlers:
         if label not in ("dog", "person"):
             return
         
-        # Filter by zone
         zones = (
             after.get("entered_zones")
             or after.get("current_zones")
             or after.get("zones")
             or []
         )
-        
-        if self.settings.toilet_zone and self.settings.toilet_zone not in zones:
-            return
-        
-        # Handle person detection
-        if label == "person":
-            import time
-            self.service.handle_person_detection(time.time())
-            return
-        
-        # Handle dog detection
-        bbox = self._extract_bbox(after)
-        if not bbox:
-            return
-        
-        detection = self._build_dog_detection(after, bbox)
-        if detection:
-            self.service.handle_dog_detection(detection)
-    
-    def _extract_bbox(self, after: dict) -> Optional[BBox]:
-        """
-        Extract bounding box from event data.
-        
-        Args:
-            after: Event 'after' data
-        
-        Returns:
-            BBox tuple or None
-        """
-        # Try box format [x, y, w, h]
-        if "box" in after and isinstance(after["box"], list) and len(after["box"]) == 4:
-            x, y, w, h = after["box"]
-            return (int(x), int(y), int(x + w), int(y + h))
-        
-        # Try coordinate format
-        if all(k in after for k in ("top", "left", "bottom", "right")):
-            return (
-                int(after["left"]),
-                int(after["top"]),
-                int(after["right"]),
-                int(after["bottom"])
-            )
-        
-        return None
-    
-    def _build_dog_detection(self, after: dict, bbox: BBox) -> Optional[DogDetection]:
-        """
-        Build DogDetection from event data.
-        
-        Args:
-            after: Event 'after' data
-            bbox: Bounding box
-        
-        Returns:
-            DogDetection or None
-        """
-        import time
-        
-        zones = (
-            after.get("entered_zones")
-            or after.get("current_zones")
-            or after.get("zones")
-            or []
+        if not isinstance(zones, list):
+            zones = []
+
+        # Zone filter:
+        # - legacy behavior: only process detections in `toilet_zone`
+        # - new behavior (recommended): monitor all zones to detect accidents,
+        #   while using `proper_zone` only for compliance classification.
+        if (not self.settings.monitor_all_zones) and self.settings.toilet_zone:
+            if self.settings.toilet_zone not in zones:
+                return
+
+        try:
+            st = float(after.get("start_time")) if after.get("start_time") is not None else None
+        except Exception:
+            st = None
+        try:
+            et = float(after.get("end_time")) if after.get("end_time") is not None else None
+        except Exception:
+            et = None
+
+        has_clip = after.get("has_clip")
+        if isinstance(has_clip, bool):
+            hc = has_clip
+        else:
+            hc = None
+
+        upd = FrigateEventUpdate(
+            type=evt_type,
+            camera=cam,
+            label=label,
+            event_id=event_id,
+            zones=[str(z) for z in zones if z is not None],
+            start_time=st,
+            end_time=et,
+            has_clip=hc,
         )
-        
-        return DogDetection(
-            bbox=bbox,
-            ratio=float(after.get("ratio", 1.0)),
-            stationary=bool(after.get("stationary", False)),
-            speed=float(after.get("current_estimated_speed", 0.0)),
-            motionless_count=int(after.get("motionless_count", 0)),
-            timestamp=time.time(),
-            zones=zones,
-        )
+
+        # Extra hint: some Frigate versions set end_time but keep type=update; pass both.
+        ended_now = bool(upd.end_time) and (before.get("end_time") in (None, 0, 0.0, ""))
+        if ended_now and upd.type not in ("end",):
+            upd.type = "end"
+
+        if upd.label == "person":
+            self.service.handle_person_event(upd)
+            return
+
+        self.service.handle_dog_event(upd)
 

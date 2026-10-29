@@ -198,6 +198,7 @@ home/ellie/debug/log              # Debug logs (if enabled)
 - `SQUAT_MIN_DURATION_S=5.0` - Minimum squat duration
 - `RESIDUE_CONFIRM_WINDOW_S=20` - Confirmation window
 - `ENABLE_DEBUG_WATCHER=false` - Enable debug logging
+- `LAST_IMG_MAX_AGE_S=240` - If the last confirmed pee image is older than this (seconds), the pee increment gate allows the new pee without comparing images (avoids blocking real pees after long idle).
 
 See `settings.py` for complete list.
 

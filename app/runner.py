@@ -7,6 +7,7 @@ from adapters.clock import SystemClock
 from adapters import cv_ops
 from adapters.frigate_client import FrigateClient
 from adapters.mqtt_client import MQTTClient
+from adapters.state_store import JsonStateStore
 from domain.services import EllieWatcherService
 from app.handlers import MQTTHandlers
 
@@ -26,6 +27,7 @@ class Application:
             self.settings,
             debug_enabled=self.settings.enable_debug_watcher
         )
+        self.state_store = JsonStateStore(self.settings.state_store_path)
         
         # Initialize service
         self.service = EllieWatcherService(
@@ -34,6 +36,7 @@ class Application:
             cv_ops=cv_ops,
             frigate_client=self.frigate,
             mqtt_client=self.mqtt,
+            state_store=self.state_store,
         )
         
         # Initialize handlers
@@ -53,8 +56,10 @@ class Application:
             f"mqtt={self.settings.mqtt_host}:{self.settings.mqtt_port}"
         )
         self.mqtt.log(
-            f"Heuristics: squat_thr={self.settings.squat_score_thresh} "
-            f"min_dur={self.settings.squat_min_duration_s}s"
+            "Heuristics:",
+            f"poop_min_area={self.settings.residue_min_area}",
+            f"pee_min_area={self.settings.pee_min_area}",
+            f"confirm_win_s=max({self.settings.residue_confirm_window_s},{self.settings.pee_confirm_window_s})",
         )
         
         if self.settings.enable_debug_watcher:
@@ -77,21 +82,22 @@ class Application:
         """Log all settings for debugging."""
         self.mqtt.log(
             f"All settings: "
-            f"SQUAT_THR={self.settings.squat_score_thresh}, "
-            f"SQUAT_MIN_S={self.settings.squat_min_duration_s}, "
             f"RES_WIN_S={self.settings.residue_confirm_window_s}, "
             f"RES_MIN_A={self.settings.residue_min_area}, "
             f"RES_STATIC_S={self.settings.residue_static_sec}, "
             f"SNAP_FPS={self.settings.snapshot_fps}, "
             f"CHECK_INT_S={self.settings.check_interval_s}, "
             f"EP_COOLDOWN_S={self.settings.ep_cooldown_s}, "
-            f"LEAVE_TIMEOUT_S={self.settings.leave_timeout_s}, "
             f"MERGE_RADIUS_PX={self.settings.merge_radius_px}, "
             f"MIN_CIRCULARITY={self.settings.min_circularity}, "
             f"MIN_SOLIDITY={self.settings.min_solidity}, "
             f"HSV_S_MIN={self.settings.hsv_s_min}, "
-            f"MOTIONLESS_MIN={self.settings.motionless_min}, "
-            f"SPEED_MAX_STILL={self.settings.speed_max_still}"
+            f"PEE_MIN_A={self.settings.pee_min_area}, "
+            f"PEE_STATIC_S={self.settings.pee_static_sec}, "
+            f"PEE_MASS_MIN={self.settings.pee_mass_min}, "
+            f"PEE_INC_EN={self.settings.pee_increment_enabled}, "
+            f"PEE_INC_MASS_MIN={self.settings.pee_increment_mass_min}, "
+            f"LAST_IMG_MAX_AGE_S={self.settings.last_image_max_age_s}"
         )
 
 

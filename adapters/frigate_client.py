@@ -31,6 +31,71 @@ class FrigateClient:
             return decode_image(r.content)
         except Exception as e:
             raise RuntimeError(f"Failed to fetch snapshot: {e}")
+
+    def fetch_config(self) -> Dict[str, Any]:
+        """Fetch Frigate config via API (best-effort)."""
+        try:
+            url = f"{self.base_url}/api/config"
+            r = requests.get(url, timeout=3.0)
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def get_zone_bbox_for_snapshot(self, zone_name: str, frame_w: int, frame_h: int) -> Optional[tuple[int, int, int, int]]:
+        """
+        Best-effort: derive a zone bounding box in snapshot pixel coordinates.
+
+        Uses `/api/config` zone polygon coordinates (typically in detect resolution)
+        and scales to the provided snapshot dimensions using the camera detect
+        width/height when available.
+        """
+        cfg = self.fetch_config()
+        cams = cfg.get("cameras") if isinstance(cfg.get("cameras"), dict) else {}
+        cam = cams.get(self.camera) if isinstance(cams, dict) else None
+        if not isinstance(cam, dict):
+            return None
+
+        detect = cam.get("detect") if isinstance(cam.get("detect"), dict) else {}
+        det_w = int(detect.get("width") or 0)
+        det_h = int(detect.get("height") or 0)
+        if det_w <= 0 or det_h <= 0:
+            # Fall back: assume zone coords already match snapshot resolution.
+            det_w = int(frame_w)
+            det_h = int(frame_h)
+
+        zones = cam.get("zones") if isinstance(cam.get("zones"), dict) else {}
+        z = zones.get(zone_name) if isinstance(zones, dict) else None
+        if not isinstance(z, dict):
+            return None
+
+        coords = z.get("coordinates")
+        pts: list[tuple[float, float]] = []
+
+        # Coordinates can be a list of pairs or a flat list.
+        if isinstance(coords, list) and coords:
+            if all(isinstance(p, list) and len(p) == 2 for p in coords):
+                pts = [(float(p[0]), float(p[1])) for p in coords]
+            elif all(isinstance(v, (int, float)) for v in coords) and (len(coords) % 2 == 0):
+                it = iter(coords)
+                pts = [(float(x), float(y)) for x, y in zip(it, it)]
+
+        if not pts:
+            return None
+
+        sx = float(frame_w) / float(det_w)
+        sy = float(frame_h) / float(det_h)
+        xs = [p[0] * sx for p in pts]
+        ys = [p[1] * sy for p in pts]
+
+        x1 = max(0, int(min(xs)))
+        y1 = max(0, int(min(ys)))
+        x2 = min(int(frame_w), int(max(xs)))
+        y2 = min(int(frame_h), int(max(ys)))
+        if x1 >= x2 or y1 >= y2:
+            return None
+        return (x1, y1, x2 - x1, y2 - y1)
     
     def create_event(
         self,
@@ -99,6 +164,7 @@ class FrigateClient:
         timestamp: float,
         before_window: float = 45.0,
         after_window: float = 120.0,
+        zone: Optional[str] = None,
     ) -> Optional[str]:
         """
         Find a dog event near the given timestamp.
@@ -124,9 +190,10 @@ class FrigateClient:
                 "before": before,
                 "limit": 15,
             }
-            
-            if self.zone:
-                params["zone"] = self.zone
+
+            zone_filter = zone if zone not in (None, "") else self.zone
+            if zone_filter:
+                params["zone"] = zone_filter
             
             r = requests.get(url, params=params, timeout=3.0)
             r.raise_for_status()

@@ -1,7 +1,7 @@
 name: Ellie Watcher
-version: "2.0.3"
+version: "2.4.3"
 slug: ellie-watcher
-description: Heuristic detection (poop/coprophagia) integrated with Frigate/MQTT.
+description: Heuristic detection (pee/poop) integrated with Frigate/MQTT.
 arch:
   - aarch64
   - armv7
@@ -24,16 +24,54 @@ options:
 
   frigate_base_url: "http://ccab4aaf-frigate:5000"
   camera_name: "ellie"
-  toilet_zone: "toilet_zone"
+  toilet_zone: "pad_zone"
+  # The zone that represents the proper pee/poop area (pad zone).
+  # Used for compliance classification (proper vs outside).
+  proper_zone: "pad_zone"
+  # If true, process dog/person events even when NOT in toilet_zone.
+  # Required to detect accidents outside the pad area.
+  monitor_all_zones: true
 
-  squat_score_thresh: 0.58
-  squat_min_duration_s: 7
-  residue_confirm_window_s: 45
-  residue_min_area: 80
-  residue_static_sec: 1.5
+  residue_confirm_window_s: 60
+  residue_min_area: 50
+  residue_static_sec: 1.0
   snapshot_fps: 4
   check_interval_s: 15
-  enable_debug_watcher: false
+  enable_debug_watcher: true
+
+  # Evidence bundles (saved to /data for debugging + dataset building)
+  evidence_enabled: true
+  evidence_dir: "/data/evidence"
+
+  # Pee detection (confirmation after squat ends).
+  pee_enabled: true
+  pee_confirm_window_s: 35
+  pee_min_area: 150
+  pee_static_sec: 0.8
+  pee_delta_l_min: 6
+  pee_delta_l_bright_min: 8
+  pee_delta_b_min: 8
+  pee_mass_min: 800
+  pee_increment_enabled: true
+  pee_increment_mass_min: 500
+  last_image_max_age_s: 240
+
+  # Pad reference image (persisted) + capture heuristics
+  pad_ref_image_path: "/data/pad_clean_ref.jpg"
+  pad_ref_person_window_s: 180
+  pad_ref_dog_absent_s: 5
+
+  # De-dup / merge tuning
+  pee_cooldown_s: 45
+  pee_merge_radius_px: 70
+  ep_cooldown_s: 180
+  merge_radius_px: 90
+
+  # Deprecated (kept for options.json backward compatibility; not used by v2 logic)
+  squat_score_thresh: 0.58
+  squat_min_duration_s: 7
+  ml_enabled: false
+  pee_thresh: 0.70
 
 schema:
   mqtt_host: str
@@ -44,6 +82,8 @@ schema:
   frigate_base_url: str
   camera_name: str
   toilet_zone: str
+  proper_zone: str
+  monitor_all_zones: bool
   squat_score_thresh: float
   squat_min_duration_s: float
   residue_confirm_window_s: float
@@ -52,3 +92,29 @@ schema:
   snapshot_fps: int
   check_interval_s: int
   enable_debug_watcher: bool
+  evidence_enabled: bool
+  evidence_dir: str
+
+  pee_enabled: bool
+  pee_confirm_window_s: float
+  pee_min_area: int
+  pee_static_sec: float
+  pee_delta_l_min: int
+  pee_delta_l_bright_min: int
+  pee_delta_b_min: int
+  pee_mass_min: int
+  pee_increment_enabled: bool
+  pee_increment_mass_min: int
+  last_image_max_age_s: float
+
+  pad_ref_image_path: str
+  pad_ref_person_window_s: float
+  pad_ref_dog_absent_s: float
+
+  pee_cooldown_s: float
+  pee_merge_radius_px: int
+  ep_cooldown_s: float
+  merge_radius_px: int
+
+  ml_enabled: bool
+  pee_thresh: float

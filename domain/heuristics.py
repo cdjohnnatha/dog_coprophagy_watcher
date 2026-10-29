@@ -3,59 +3,8 @@ Domain heuristics - Pure functions for scoring and detection logic.
 No I/O, no side effects - only calculations.
 """
 import numpy as np
-from typing import Optional, Tuple
-from .models import SquatScore, Blob, ShapeParams, CoprophagyThresholds, Point
-
-
-def score_squat(
-    ratio: float,
-    stationary: bool,
-    speed: float,
-    motionless_count: int,
-    squat_thresh: float,
-    motionless_min: int,
-    speed_max_still: float,
-) -> SquatScore:
-    """
-    Calculate squat score based on dog's posture metrics.
-    
-    Args:
-        ratio: Height/width ratio of bounding box
-        stationary: Whether dog is marked as stationary
-        speed: Estimated speed
-        motionless_count: Number of consecutive motionless frames
-        squat_thresh: Threshold for considering it a squat
-        motionless_min: Minimum motionless frames required
-        speed_max_still: Maximum speed to be considered still
-    
-    Returns:
-        SquatScore with detailed scoring breakdown
-    """
-    # Ratio term: lower ratio (wider) = higher score
-    ratio_term = max(0.0, min(1.0, (0.70 - ratio) / 0.20))
-    
-    # Really still check
-    really_still = (
-        stationary 
-        and (motionless_count >= motionless_min) 
-        and (speed <= speed_max_still)
-    )
-    stationary_term = 1.0 if really_still else 0.0
-    
-    # Speed term
-    speed_term_raw = max(0.0, min(1.0, 1.0 - min(speed, 1.0)))
-    speed_term = 0.0 if speed > speed_max_still else speed_term_raw
-    
-    # Weighted combination
-    score = 0.55 * ratio_term + 0.30 * stationary_term + 0.15 * speed_term
-    
-    return SquatScore(
-        score=score,
-        ratio_term=ratio_term,
-        stationary_term=stationary_term,
-        speed_term=speed_term,
-        is_squatting=(score >= squat_thresh),
-    )
+from typing import Tuple
+from .models import ShapeParams, Point, ROI
 
 
 def calculate_circularity(area: float, perimeter: float) -> float:
@@ -127,51 +76,17 @@ def passes_texture_filter(
     return True
 
 
-def is_coprophagy(
-    area0: int,
-    measured_area: int,
-    cum_area_min: int,
-    person_present: bool,
-    thresholds: CoprophagyThresholds,
-    window_elapsed: float,
-) -> bool:
+def point_in_roi(centroid: Point, pad_roi: ROI) -> bool:
     """
-    Determine if coprophagy occurred based on area drop.
-    
-    Args:
-        area0: Initial confirmed poop area
-        measured_area: Current measured area
-        cum_area_min: Minimum area observed in cumulative window
-        person_present: Whether a person was present during visit
-        thresholds: Detection thresholds
-        window_elapsed: Time elapsed since cumulative window start
-    
-    Returns:
-        True if coprophagy is detected
+    Return True if the point (in frame coordinates) lies inside the ROI.
+
+    pad_roi is (x, y, w, h). Point is (px, py).
     """
-    if person_present:
+    if not centroid or not pad_roi or len(pad_roi) != 4:
         return False
-    
-    if area0 == 0:
-        return False
-    
-    # Immediate drop fraction
-    drop_frac = max(0.0, float(area0 - measured_area) / float(area0))
-    
-    # Cumulative drop fraction
-    cum_drop = max(0.0, float(area0 - cum_area_min) / float(area0))
-    
-    # Check if within cumulative window
-    window_ok = window_elapsed <= thresholds.cum_window_s
-    
-    # Decision logic
-    if drop_frac >= thresholds.copro_drop_frac:
-        return True
-    
-    if window_ok and cum_drop >= thresholds.cum_drop_frac:
-        return True
-    
-    return False
+    px, py = int(centroid[0]), int(centroid[1])
+    rx, ry, rw, rh = int(pad_roi[0]), int(pad_roi[1]), int(pad_roi[2]), int(pad_roi[3])
+    return rx <= px < rx + rw and ry <= py < ry + rh
 
 
 def distance_px(point_a: Point, point_b: Point) -> float:
@@ -179,15 +94,6 @@ def distance_px(point_a: Point, point_b: Point) -> float:
     dx = point_a[0] - point_b[0]
     dy = point_a[1] - point_b[1]
     return (dx * dx + dy * dy) ** 0.5
-
-
-def is_near_poop(
-    dog_center: Point,
-    poop_centroid: Point,
-    near_radius_px: int,
-) -> bool:
-    """Check if dog is near the poop."""
-    return distance_px(dog_center, poop_centroid) <= near_radius_px
 
 
 def should_merge_episode(

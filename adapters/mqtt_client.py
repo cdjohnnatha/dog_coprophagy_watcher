@@ -104,16 +104,21 @@ class MQTTClient:
         """Publish poop detection event."""
         topic = self.settings.get_topic("poop_event")
         self.publish(topic, data)
-    
-    def publish_coprophagy_risk(self, data: Dict[str, Any]) -> None:
-        """Publish coprophagy risk alert."""
-        topic = self.settings.get_topic("copro_risk")
-        self.publish(topic, data)
-    
-    def publish_coprophagy_event(self, data: Dict[str, Any]) -> None:
-        """Publish coprophagy confirmation event."""
-        topic = self.settings.get_topic("copro_event")
-        self.publish(topic, data)
+
+    def publish_elimination_start(self, data: Dict[str, Any]) -> None:
+        """Publish elimination start (non-retained)."""
+        topic = self.settings.get_topic("elimination_start")
+        self.publish(topic, data, retain=False)
+
+    def publish_elimination_event(self, data: Dict[str, Any]) -> None:
+        """Publish canonical elimination event (non-retained)."""
+        topic = self.settings.get_topic("elimination_event")
+        self.publish(topic, data, retain=False)
+
+    def publish_elimination_stats(self, data: Dict[str, Any]) -> None:
+        """Publish elimination aggregate stats (retained)."""
+        topic = self.settings.get_topic("elimination_stats")
+        self.publish(topic, data, retain=True)
     
     def publish_health(self) -> None:
         """Publish health status."""
@@ -129,6 +134,19 @@ class MQTTClient:
         }
         self.publish(topic, payload)
     
+    def publish_increment_gate_debug(self, data: Dict[str, Any]) -> None:
+        """
+        Publish increment gate comparison result (wet_mass, wet_coverage, etc.)
+        only when debug is enabled, for last-image verification.
+        """
+        if not self.debug_enabled:
+            return
+        try:
+            topic = self.settings.get_topic("increment_gate")
+            self.publish(topic, data, retain=False)
+        except Exception:
+            pass
+
     def log(self, *args: Any) -> None:
         """
         Log debug message.

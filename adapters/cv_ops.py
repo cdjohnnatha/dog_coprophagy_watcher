@@ -5,7 +5,7 @@ All CV-related functionality isolated here.
 import cv2
 import numpy as np
 from typing import Optional, Tuple, List
-from domain.models import Blob, ROI, ShapeParams
+from domain.models import Blob, PeeCandidate, ROI, ShapeParams
 from domain import heuristics
 
 
@@ -269,4 +269,267 @@ def diff_area(
         total += int(area)
     
     return total
+
+
+def diff_wet_blob(
+    bg_roi: Optional[np.ndarray],
+    cur_roi: Optional[np.ndarray],
+    min_area: int = 220,
+    delta_l_min: int = 10,
+) -> Optional[Blob]:
+    """
+    Detect a stable "wet spot" (pee) by looking for darkening vs background.
+
+    This heuristic works best on light/white pads where urine causes a darker region.
+
+    Args:
+        bg_roi: Background reference image (BGR)
+        cur_roi: Current ROI image (BGR)
+        min_area: Minimum contour area to accept
+        delta_l_min: Minimum LAB L-channel decrease to consider "wet"
+
+    Returns:
+        Blob of the largest qualifying wet region, or None.
+    """
+    cand = diff_wet_candidate(
+        bg_roi=bg_roi,
+        cur_roi=cur_roi,
+        min_area=min_area,
+        delta_l_min=delta_l_min,
+        delta_l_bright_min=12,
+        delta_b_min=10,
+        mass_min=0,
+    )
+    return None if cand is None else cand.blob
+
+
+def diff_wet_candidate(
+    bg_roi: Optional[np.ndarray],
+    cur_roi: Optional[np.ndarray],
+    min_area: int,
+    delta_l_min: int,
+    delta_l_bright_min: int,
+    delta_b_min: int,
+    mass_min: int,
+) -> Optional[PeeCandidate]:
+    """
+    Detect a candidate wet spot (pee) using multiple cues:
+
+    - Darkening in LAB L* (common on pads)
+    - Brightening in LAB L* (specular / some lighting)
+    - Yellowing in LAB b* (very strong in your snapshots)
+
+    Returns a PeeCandidate with a "mass" score (integrated change) so that
+    pee-on-pee can be detected even when the area grows only slightly.
+    """
+    if bg_roi is None or cur_roi is None or bg_roi.size == 0 or cur_roi.size == 0:
+        return None
+
+    try:
+        if bg_roi.shape[:2] != cur_roi.shape[:2]:
+            cur_roi = cv2.resize(
+                cur_roi,
+                (bg_roi.shape[1], bg_roi.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+        lab0 = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2LAB)
+        lab1 = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2LAB)
+    except cv2.error:
+        return None
+
+    # Split channels (int16 to allow signed deltas).
+    l0 = lab0[:, :, 0].astype(np.int16)
+    a0 = lab0[:, :, 1].astype(np.int16)
+    b0 = lab0[:, :, 2].astype(np.int16)
+    l1 = lab1[:, :, 0].astype(np.int16)
+    a1 = lab1[:, :, 1].astype(np.int16)
+    b1 = lab1[:, :, 2].astype(np.int16)
+
+    # Deltas.
+    dL_dark = (l0 - l1)          # positive where current is darker
+    dL_bright = (l1 - l0)        # positive where current is brighter
+    dB_yellow = (b1 - b0)        # positive where current is more yellow
+
+    # Candidate masks.
+    mask_dark = (dL_dark >= int(delta_l_min))
+    mask_bright = (dL_bright >= int(delta_l_bright_min))
+    mask_yellow = (dB_yellow >= int(delta_b_min))
+
+    # Combine and clean.
+    mask = (mask_dark | mask_bright | mask_yellow).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+
+    best_blob: Optional[Blob] = None
+    best_area = 0
+    best_mass = 0
+
+    for c in cnts:
+        area = int(cv2.contourArea(c))
+        if area < int(min_area):
+            continue
+
+        x, y, w, h = cv2.boundingRect(c)
+        if w <= 0 or h <= 0:
+            continue
+
+        # Compute centroid.
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # Integrated mass on this contour mask.
+        cmask = np.zeros(mask.shape[:2], dtype=np.uint8)
+        cv2.drawContours(cmask, [c], -1, 255, -1)
+        m = (cmask.astype(bool))
+
+        # Mass = integrated change above thresholds (sum of residuals).
+        mass_dark = int(np.maximum(0, dL_dark - int(delta_l_min))[m].sum()) if delta_l_min > 0 else 0
+        mass_bright = int(np.maximum(0, dL_bright - int(delta_l_bright_min))[m].sum()) if delta_l_bright_min > 0 else 0
+        mass_yellow = int(np.maximum(0, dB_yellow - int(delta_b_min))[m].sum()) if delta_b_min > 0 else 0
+        mass = int(mass_dark + mass_bright + mass_yellow)
+
+        # Choose the strongest candidate by (area, then mass).
+        if area > best_area or (area == best_area and mass > best_mass):
+            best_area = area
+            best_mass = mass
+            best_blob = Blob(
+                x=int(x),
+                y=int(y),
+                width=int(w),
+                height=int(h),
+                centroid=(int(cx), int(cy)),
+                area=int(area),
+            )
+
+    if best_blob is None:
+        return None
+
+    # Optional mass gate (used by the caller).
+    if int(mass_min) > 0 and int(best_mass) < int(mass_min) and int(best_blob.area) < int(min_area):
+        return None
+
+    return PeeCandidate(blob=best_blob, mass=int(best_mass))
+
+
+def wetness_metrics(
+    ref_roi: Optional[np.ndarray],
+    cur_roi: Optional[np.ndarray],
+    delta_l_min: int,
+    delta_l_bright_min: int,
+    delta_b_min: int,
+) -> Optional[dict]:
+    """
+    Compute coarse wetness metrics between a clean reference ROI and current ROI.
+
+    Returns:
+      - wet_coverage: fraction of pixels flagged as changed (0..1)
+      - wet_mass: integrated change above thresholds (int)
+    """
+    if ref_roi is None or cur_roi is None or ref_roi.size == 0 or cur_roi.size == 0:
+        return None
+
+    try:
+        if ref_roi.shape[:2] != cur_roi.shape[:2]:
+            cur_roi = cv2.resize(cur_roi, (ref_roi.shape[1], ref_roi.shape[0]), interpolation=cv2.INTER_AREA)
+        lab0 = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2LAB)
+        lab1 = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2LAB)
+    except cv2.error:
+        return None
+
+    l0 = lab0[:, :, 0].astype(np.int16)
+    b0 = lab0[:, :, 2].astype(np.int16)
+    l1 = lab1[:, :, 0].astype(np.int16)
+    b1 = lab1[:, :, 2].astype(np.int16)
+
+    dL_dark = (l0 - l1)
+    dL_bright = (l1 - l0)
+    dB_yellow = (b1 - b0)
+
+    mask_dark = (dL_dark >= int(delta_l_min))
+    mask_bright = (dL_bright >= int(delta_l_bright_min))
+    mask_yellow = (dB_yellow >= int(delta_b_min))
+
+    mask = (mask_dark | mask_bright | mask_yellow).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+
+    wet_px = int(cv2.countNonZero(mask))
+    total_px = int(mask.shape[0] * mask.shape[1])
+    wet_coverage = float(wet_px) / float(max(1, total_px))
+
+    m = mask.astype(bool)
+    mass_dark = int(np.maximum(0, dL_dark - int(delta_l_min))[m].sum()) if delta_l_min > 0 else 0
+    mass_bright = int(np.maximum(0, dL_bright - int(delta_l_bright_min))[m].sum()) if delta_l_bright_min > 0 else 0
+    mass_yellow = int(np.maximum(0, dB_yellow - int(delta_b_min))[m].sum()) if delta_b_min > 0 else 0
+    wet_mass = int(mass_dark + mass_bright + mass_yellow)
+
+    return {"wet_coverage": wet_coverage, "wet_mass": wet_mass}
+
+
+def wet_mask(
+    ref_roi: Optional[np.ndarray],
+    cur_roi: Optional[np.ndarray],
+    delta_l_min: int,
+    delta_l_bright_min: int,
+    delta_b_min: int,
+) -> Optional[np.ndarray]:
+    """
+    Build a binary wetness mask (uint8 0/255) using the same cues as wetness_metrics.
+    """
+    if ref_roi is None or cur_roi is None or ref_roi.size == 0 or cur_roi.size == 0:
+        return None
+
+    try:
+        if ref_roi.shape[:2] != cur_roi.shape[:2]:
+            cur_roi = cv2.resize(cur_roi, (ref_roi.shape[1], ref_roi.shape[0]), interpolation=cv2.INTER_AREA)
+        lab0 = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2LAB)
+        lab1 = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2LAB)
+    except cv2.error:
+        return None
+
+    l0 = lab0[:, :, 0].astype(np.int16)
+    b0 = lab0[:, :, 2].astype(np.int16)
+    l1 = lab1[:, :, 0].astype(np.int16)
+    b1 = lab1[:, :, 2].astype(np.int16)
+
+    dL_dark = (l0 - l1)
+    dL_bright = (l1 - l0)
+    dB_yellow = (b1 - b0)
+
+    mask_dark = (dL_dark >= int(delta_l_min))
+    mask_bright = (dL_bright >= int(delta_l_bright_min))
+    mask_yellow = (dB_yellow >= int(delta_b_min))
+
+    mask = (mask_dark | mask_bright | mask_yellow).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+    return mask
+
+
+def diff_mask_otsu(bg_roi: Optional[np.ndarray], cur_roi: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """Generic absdiff + OTSU mask (uint8 0/255) for evidence/debugging."""
+    if bg_roi is None or cur_roi is None or bg_roi.size == 0 or cur_roi.size == 0:
+        return None
+    try:
+        if bg_roi.shape[:2] != cur_roi.shape[:2]:
+            cur_roi = cv2.resize(cur_roi, (bg_roi.shape[1], bg_roi.shape[0]), interpolation=cv2.INTER_AREA)
+        g0 = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2GRAY)
+        g1 = cv2.cvtColor(cur_roi, cv2.COLOR_BGR2GRAY)
+    except cv2.error:
+        return None
+
+    g0 = cv2.GaussianBlur(g0, (5, 5), 0)
+    g1 = cv2.GaussianBlur(g1, (5, 5), 0)
+    d = cv2.absdiff(g1, g0)
+    _, th = cv2.threshold(d, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    return th
 
