@@ -76,7 +76,7 @@ class PadsMixin:
                 self.store.insert_presence(
                     {"id": presence_id, "started_at": row["started_at"], "state": "PRESENT"}
                 )
-                reference = self.reference.latest()
+                reference = self.reference.before(datetime.fromisoformat(row["started_at"]))
                 if reference:
                     self.evidence.write(directory / "before.jpg", reference[0])
             elif action.kind == "dropped":
@@ -129,6 +129,7 @@ class PadsMixin:
             needs_review=not decided,
         )
         presence = self.store.get_presence(presence_id)
+        log.info("presence %s: %s (%s)", presence_id, outcome, result.reason)
         if outcome == "replaced":
             await self._record_pad_change(
                 "detected",
@@ -195,6 +196,7 @@ class PadsMixin:
                 "pad_color": pad_color,
             }
         )
+        log.info("pad change %s at %s (%s)", change_id, at, source)
         message = {"pad_change_id": change_id, "at": at, "source": source}
         await self._publish("ellie/pad/changed", json.dumps(message), False)
         await self.publish_state()

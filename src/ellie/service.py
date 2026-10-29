@@ -353,8 +353,9 @@ class Service(PadsMixin):
             await self.publish_state()
 
     def _insert_started(self, visit: dict) -> None:
-        age = self.reference.age_s()
-        reference = self.reference.latest()
+        started = datetime.fromisoformat(visit["started_at"])
+        reference = self.reference.before(started)
+        age = int((started - reference[1]).total_seconds()) if reference else None
         self.store.insert_visit({**visit, "before_age_s": age, "needs_review": False})
         if reference:
             self.evidence.write(self.evidence.visit_dir(visit["id"]) / "before.jpg", reference[0])
@@ -462,6 +463,11 @@ class Service(PadsMixin):
 
     async def _visit_decided(self, visit_id: str, review_kind: str | None) -> None:
         visit = self.store.get_visit(visit_id)
+        log.info(
+            "visit %s: auto=%s final=%s poop=%s entries=%s on_pad=%ss (%s)",
+            visit_id, visit["auto_outcome"], visit["final_outcome"], visit["poop_observed"],
+            visit["entries"], visit["on_pad_s"], visit["reason"],
+        )  # fmt: skip
         await self._publish(f"ellie/visit/{visit_id}", json.dumps(visit, ensure_ascii=False), False)
         if review_kind:
             await self._request_review(visit, review_kind)

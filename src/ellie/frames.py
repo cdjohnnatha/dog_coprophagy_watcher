@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,10 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 log = logging.getLogger(__name__)
+
+
+HISTORY_SIZE = 5  # about five minutes of references (one per minute while the area is clear)
+REFERENCE_LAG_S = 10.0
 
 
 class FrameError(Exception):
@@ -89,6 +94,7 @@ class ReferenceKeeper:
         self._dir = directory
         self._clock = clock
         self._cache: tuple[bytes, datetime] | None = None
+        self._history: deque[tuple[bytes, datetime]] = deque(maxlen=HISTORY_SIZE)
 
     def update(self, jpeg_crop: bytes) -> None:
         """Store a new reference crop stamped with the current time."""
@@ -97,6 +103,21 @@ class ReferenceKeeper:
         _atomic_write(self._dir / "latest.jpg", jpeg_crop)
         _atomic_write(self._dir / "latest.json", json.dumps({"at": now.isoformat()}).encode())
         self._cache = (jpeg_crop, now)
+        self._history.append(self._cache)
+
+    def before(
+        self, moment: datetime, lag_s: float = REFERENCE_LAG_S
+    ) -> tuple[bytes, datetime] | None:
+        """The reference to use as "before" for something that started at `moment`.
+
+        Frigate counts a person or dog 1-3 s after they appear in the frame, so the newest
+        reference may already show someone entering. Prefer one taken at least `lag_s` earlier;
+        fall back to the newest (or the one on disk after a restart) when none is old enough.
+        """
+        for jpeg, at in reversed(self._history):
+            if (moment - at).total_seconds() >= lag_s:
+                return jpeg, at
+        return self.latest()
 
     def latest(self) -> tuple[bytes, datetime] | None:
         """Return the reference and its time, from memory or disk, else None."""

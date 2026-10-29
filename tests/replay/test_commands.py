@@ -259,3 +259,16 @@ async def test_photos_go_to_the_image_entities_only_when_they_change(rig):
 
     await command(rig, "label", visit_id=visit_id, label="pee", channel="dashboard")
     assert topics(rig, "ellie/image/last_pee")[-1] == (directory / "after.jpg").read_bytes()
+
+
+async def test_the_before_photo_is_older_than_the_moment_someone_entered(tmp_path, clock):
+    rig = build(tmp_path, clock)
+    old, fresh = make_jpeg((10, 10, 10)), make_jpeg((250, 250, 250))
+    rig.reference.update(old)
+    clock.advance(55)
+    rig.reference.update(fresh)  # taken 3 s before the dog is counted: may show her entering
+    clock.advance(3)
+    await rig.service.on_message("frigate/pad_zone/dog", b"1")
+    (visit,) = visits(rig)
+    assert (rig.evidence.visit_dir(visit["id"]) / "before.jpg").read_bytes() == old
+    assert visit["before_age_s"] == 58
