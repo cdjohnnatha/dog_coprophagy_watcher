@@ -18,7 +18,7 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 |---|---|---|
 | `ellie/status` | yes | `online` / `offline` (MQTT last will). Availability topic for all entities |
 | `ellie/state` | yes | JSON state for all sensors (one message, entities pick fields via `value_template`) — see [ha-entities.md](ha-entities.md) |
-| `ellie/visit/<visit_id>` | no | Visit JSON after each state change (data-model Visit fields + `evidence` relative paths) |
+| `ellie/visit/<visit_id>` | no | The stored visit row as JSON after each decision (no file paths: those are derived from the id) |
 | `ellie/review/request` | no | `{visit_id, kind: "uncertain"|"unknown"|"pad_uncertain", title, message, image: "/media/local/ellie/…/after.jpg", reason}`. For `pad_uncertain`, `visit_id` holds the presence id (`s_…`). Titles and messages are pt-BR |
 | `ellie/review/resolved` | no | `{visit_id}`. HA clears the notification tag on all devices |
 | `ellie/pad/changed` | no | `{pad_change_id, at, source}` after any recorded pad change (or undo, with `undone: true`). HA clears the `ellie_pad_reminder` notification on all devices |

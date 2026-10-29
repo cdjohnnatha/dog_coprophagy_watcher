@@ -30,7 +30,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | Review notification + action handling + clear-on-resolve | `custom/automations/ellie-pee-counter.yaml` | Sends to `notify.common_mobile_tag`, `tag: ellie_review_<id>`, image + 2 actions, `mode: queued` |
 | "No pee for a long time" alert (FR-020) | same file | Uses `input_number.ellie_no_pee_alert_hours` (tunable 5, default 8) and `input_datetime.ellie_waking_start` / `_end` (07:00 / 23:00). Fires once per gap |
 | Pad change reminder (FR-027) + pad notification actions + clear on `ellie/pad/changed` | same file | Triggers: `sensor.ellie_pad_change_due` (time trigger on a timestamp sensor) and `input_datetime.ellie_waking_start`. Conditions: due ≤ now, inside waking hours, not reminded today. `tag: ellie_pad_reminder` |
-| Scripts `script.ellie_label_visit` (`visit_id`, `label`), `script.ellie_add_manual_pee` (`at`), `script.ellie_reject_last_pee`, `script.ellie_mark_pad_changed` (`at?`), `script.ellie_undo_pad_change` | `custom/scripts/ellie-pee-counter.yaml` | Publish to `ellie/cmd/*`. `unique_id` on each |
+| Scripts `script.ellie_label_visit` (`visit_id`, `label`), `script.ellie_label_current_review` (`label`: answers the newest pending visit, which is what the Revisar card shows), `script.ellie_add_manual_pee` (`at`), `script.ellie_reject_last_pee`, `script.ellie_reanalyse_visit` (`visit_id`; run it by hand after topping up credit), `script.ellie_mark_pad_changed` (`at?`), `script.ellie_undo_pad_change` | `custom/scripts/ellie-pee-counter.yaml` | Publish to `ellie/cmd/*`. Scripts defined in YAML have no `unique_id`; the automations are named by HA from their alias (for example `automation.ellie_v3_sem_xixi_ha_muito_tempo`) |
 | Helpers above | `custom/helpers/…` (input_datetime) and `configuration.yaml` inline `input_number` (repo convention) | `unique_id`-capable definitions |
 | Gemini credit alerts | same automations file + `input_number.ellie_gemini_credit_eur` | `ellie/alert` -> notification (hard alert). `ellie_v3_gemini_credit_low` warns at 80 % of the credit declared in the helper (total credit ever added, euros), using `estimated_cost_eur_total` of `sensor.ellie_analysis_calls_month`. The helper has no `initial`: set it once to what was paid (about 4.5 for R$ 30) |
 
@@ -41,7 +41,7 @@ It is a UI (storage) dashboard, so `.storage` is never hand-edited (constitution
 Cards (all texts pt-BR):
 
 1. **Hoje**: today's count, "último xixi há X h" with the photo, uncertain count.
-2. **Revisar**: list from `sensor.ellie_review_queue` (`auto-entities`/`button-card`), each with before/after thumbnails and buttons "Fez xixi" / "Não fez" → `script.ellie_label_visit`.
+2. **Revisar**: shows the newest visit of `sensor.ellie_review_queue` (its `image.ellie_review_before/after` photos and the reason, in a markdown card) with buttons "Fez xixi" / "Não fez" → `script.ellie_label_current_review`. Answering shows the next one.
 3. **Adicionar / desfazer**: "Adicionar xixi" (time picker → `script.ellie_add_manual_pee`), "Desfazer último".
 4. **Histórico**: `apexcharts-card` columns from `sensor.ellie_pee_daily_history` `days` via `data_generator`, 30 days by default.
 5. **Precisão**: accuracy %, per-analyser table, validation mode switch, threshold.
