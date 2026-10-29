@@ -64,4 +64,4 @@ Checked on 2026-10-29 (T010):
 
 ## More Information
 
-research.md R5, [gemini-api-setup.md](https://github.com/cdjohnnatha/home-assistant-jetsons/blob/003-ellie-pee-counter/specs/003-ellie-pee-counter/gemini-api-setup.md) (setup steps, cost estimate, sources).
+research.md R5, [gemini-api-setup.md](../gemini-api-setup.md) (setup steps, cost estimate, sources).
