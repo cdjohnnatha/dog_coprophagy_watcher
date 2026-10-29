@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ellie/pad-change-result/v1",
+  "title": "Ellie pad change analysis result (pad_change_v1)",
+  "description": "Structured answer for one person presence at the tray (US7). Same BEFORE/AFTER crops as the visit analysis. 'reason' is shown to the owner, so it is Brazilian Portuguese.",
+  "type": "object",
+  "required": ["pad_replaced", "pad_replaced_confidence", "poop_removed", "image_quality", "reason"],
+  "additionalProperties": false,
+  "properties": {
+    "pad_replaced": {
+      "type": "boolean",
+      "description": "AFTER shows a different pad than BEFORE (old stains gone, new pad edges/position/colour). Picking up poop or wiping the tray alone is NOT a replacement."
+    },
+    "pad_replaced_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "pad_color": {
+      "type": "string",
+      "enum": ["white", "grey", "unknown"],
+      "description": "Colour of the pad in AFTER."
+    },
+    "poop_removed": {
+      "type": "boolean",
+      "description": "Poop visible in BEFORE is gone in AFTER. Stored only (input for future 006)."
+    },
+    "image_quality": {
+      "type": "string",
+      "enum": ["ok", "occluded", "too_dark", "camera_moved"]
+    },
+    "night_mode": { "type": "boolean" },
+    "reason": {
+      "type": "string",
+      "maxLength": 140,
+      "description": "Short explanation in pt-BR, e.g. 'tapete novo: manchas antigas sumiram e bordas mudaram'."
+    }
+  }
+}

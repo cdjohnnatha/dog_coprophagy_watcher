@@ -1,0 +1,41 @@
+name: Ellie
+version: "3.0.0"
+slug: ellie
+description: Conta os xixis da Ellie por visita ao tapete (Frigate + Gemini).
+arch:
+  - aarch64
+startup: application
+boot: auto
+services:
+  - mqtt:need
+map:
+  - type: media
+    read_only: false
+hassio_api: false
+homeassistant_api: false
+options:
+  gemini_model: gemini-3.5-flash-lite
+  # Analysis area = pad_zone bounding box + 20 % margin, normalised 0-1. Keep it
+  # identical to the Frigate zone `tray_area` (specs/003-ellie-pee-counter, R4).
+  area_x1: 0.244
+  area_y1: 0.041
+  area_x2: 0.753
+  area_y2: 0.795
+  frigate_url: http://ccab4aaf-frigate:5000
+  go2rtc_url: http://ccab4aaf-frigate:1984
+  camera: ellie
+  log_level: info
+# gemini_api_key is optional so the app can start and report "not configured".
+# It is stored by the Supervisor and never committed. MQTT credentials come from
+# the Supervisor MQTT service, not from options.
+schema:
+  gemini_api_key: password?
+  gemini_model: str
+  area_x1: float(0,1)
+  area_y1: float(0,1)
+  area_x2: float(0,1)
+  area_y2: float(0,1)
+  frigate_url: url
+  go2rtc_url: url
+  camera: str
+  log_level: list(debug|info|warning|error)
