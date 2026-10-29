@@ -26,7 +26,7 @@ def visit(vid="v_20260101_100000", **over):
 
 
 def test_migration_creates_tables(store):
-    assert store.schema_version() == len(MIGRATIONS) == 1
+    assert store.schema_version() == len(MIGRATIONS) == 2
     names = {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"visits", "analyses", "settings"} <= names
 
@@ -35,7 +35,7 @@ def test_migration_twice_is_noop(tmp_path):
     path = str(tmp_path / "x.db")
     Store(path).close()
     s = Store(path)
-    assert s.schema_version() == 1
+    assert s.schema_version() == 2
     s.close()
 
 

@@ -50,6 +50,8 @@ MIGRATIONS: list[str] = [
         value TEXT NOT NULL
     );
     """,
+    # 2: seconds she stood on the pad itself (zone tray_pad), kept as evidence
+    "ALTER TABLE visits ADD COLUMN on_pad_s REAL;",
 ]
 
 _VISIT_COLUMNS = (
@@ -68,6 +70,7 @@ _VISIT_COLUMNS = (
     "reason",
     "needs_review",
     "deciding_analyser",
+    "on_pad_s",
 )
 _BOOL_FIELDS = ("person_present", "needs_review")
 _JSON_FIELDS = ("frigate_event_ids",)
