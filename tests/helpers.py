@@ -156,3 +156,47 @@ def make_visit(**overrides: Any) -> dict:
         "on_pad_s": 2.5,
     }
     return {**base, **overrides}
+
+
+def build_rig(tmp_path, clock, analyser=None, **overrides):
+    """A whole Service wired to fakes: real store/evidence on tmp_path, fake camera and publisher."""
+    import json
+    from types import SimpleNamespace
+
+    from ellie.evidence import Evidence
+    from ellie.frames import ReferenceKeeper
+    from ellie.service import Service
+    from ellie.store import Store
+    from ellie.visits import VisitTracker
+
+    store = Store(str(tmp_path / "ellie.db"))
+    published: list[tuple[str, object, bool]] = []
+
+    async def publish(topic, payload, retain):
+        is_json = isinstance(payload, str) and payload.startswith(("{", "["))
+        body = json.loads(payload) if is_json else payload
+        published.append((topic, body, retain))
+
+    async def fetch_frame():
+        return make_jpeg((120, 120, 120))
+
+    async def fetch_snapshot(event_id):
+        return make_jpeg((90, 90, 90))
+
+    analyser = analyser or FakeAnalyser(id="gemini:pee_v1")
+    parts = {
+        "store": store,
+        "evidence": Evidence(tmp_path / "media"),
+        "reference": ReferenceKeeper(tmp_path / "ref", clock),
+        "tracker": VisitTracker(),
+        "analysers": {analyser.id: analyser},
+        "fetch_frame": fetch_frame,
+        "fetch_snapshot": fetch_snapshot,
+        "crop": lambda jpeg: jpeg,
+        "publish": publish,
+        "clock": clock,
+        **overrides,
+    }
+    service = Service(**parts)
+    return SimpleNamespace(service=service, store=store, published=published, analyser=analyser,
+                           evidence=parts["evidence"], reference=parts["reference"], clock=clock)  # fmt: skip

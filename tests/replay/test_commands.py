@@ -250,7 +250,8 @@ async def test_photos_go_to_the_image_entities_only_when_they_change(rig):
     sent = {t: (b, r) for t, b, r in rig.published if t.startswith("ellie/image/")}
     assert sent["ellie/image/review_before"] == ((directory / "before.jpg").read_bytes(), True)
     assert sent["ellie/image/review_after"] == ((directory / "after.jpg").read_bytes(), True)
-    assert "ellie/image/last_pee" not in sent  # an uncertain visit is not a counted pee
+    placeholder = sent["ellie/image/last_pee"][0]  # nothing counted yet: a flat placeholder
+    assert placeholder != (directory / "after.jpg").read_bytes() and placeholder[:2] == b"\xff\xd8"
 
     count = len([t for t, *_ in rig.published if t.startswith("ellie/image/")])
     await rig.service.minute_tasks()
@@ -272,3 +273,12 @@ async def test_the_before_photo_is_older_than_the_moment_someone_entered(tmp_pat
     (visit,) = visits(rig)
     assert (rig.evidence.visit_dir(visit["id"]) / "before.jpg").read_bytes() == old
     assert visit["before_age_s"] == 58
+
+
+async def test_a_manual_pee_in_the_same_second_does_not_collide_with_a_visit(rig, clock):
+    stamp = clock().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    await command(rig, "manual_pee", at=stamp)  # takes the id of this very second
+    await rig.service.on_message("frigate/pad_zone/dog", b"1")  # the dog enters in the same second
+    ids = [v["id"] for v in visits(rig)]
+    assert len(ids) == len(set(ids)) == 2
+    assert rig.service.tracker.active["id"] in ids

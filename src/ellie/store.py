@@ -233,6 +233,11 @@ class Store:
         sql = "SELECT * FROM visits WHERE needs_review = 1 ORDER BY started_at DESC LIMIT ?"
         return [_visit_from_row(r) for r in self._db.execute(sql, (limit,))]
 
+    def review_count(self) -> int:
+        return int(
+            self._db.execute("SELECT COUNT(*) FROM visits WHERE needs_review = 1").fetchone()[0]
+        )
+
     def latest_visit(self) -> dict | None:
         row = self._db.execute("SELECT * FROM visits ORDER BY started_at DESC LIMIT 1").fetchone()
         return None if row is None else _visit_from_row(row)
@@ -351,7 +356,8 @@ class Store:
         rows = self._db.execute(
             "SELECT v.id FROM visits v JOIN labels l ON l.visit_id = v.id"
             " AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
-            " WHERE v.started_at >= ? AND (v.auto_outcome IS NULL OR v.auto_outcome != l.label)",
+            " WHERE v.started_at >= ? AND (v.auto_outcome IS NULL OR"
+            " (v.auto_outcome NOT IN ('uncertain', 'unknown') AND v.auto_outcome != l.label))",
             (start_iso,),
         )
         return {r["id"] for r in rows}
@@ -366,8 +372,9 @@ class Store:
             " JOIN labels l ON l.visit_id = v.id"
             "  AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
             " LEFT JOIN analyses a ON a.visit_id = v.id"
+            "  AND a.error IS NULL"
             "  AND a.id = (SELECT MAX(id) FROM analyses WHERE visit_id = v.id"
-            "              AND analyser = a.analyser)"
+            "              AND analyser = a.analyser AND error IS NULL)"
             " WHERE v.started_at >= ? ORDER BY v.started_at",
             (since_iso,),
         )

@@ -8,6 +8,9 @@ from zoneinfo import ZoneInfo
 
 from ellie.store import Store
 
+OVERDUE_AFTER_H = (
+    6  # unanswered 'uncertain' visits become 'unknown' after a day change AND this long
+)
 LOCAL_TZ = ZoneInfo("Europe/Lisbon")
 _ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -132,7 +135,13 @@ class Counting:
         end = day_bounds_utc(today, self._tz)[0]
         resolved = []
         for v in self._store.visits_started_between(start, end):
-            if v.get("auto_outcome") == "uncertain" and v.get("final_outcome") is None:
+            # a visit asked just before midnight still gets a few hours to be answered
+            age_h = (now - datetime.fromisoformat(v["started_at"])).total_seconds() / 3600
+            if (
+                v.get("auto_outcome") == "uncertain"
+                and v.get("final_outcome") is None
+                and age_h >= OVERDUE_AFTER_H
+            ):
                 self._store.update_visit(v["id"], final_outcome="unknown", needs_review=True)
                 resolved.append(v["id"])
         return resolved

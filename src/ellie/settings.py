@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from pathlib import Path
 
 import httpx
@@ -115,6 +116,8 @@ def clamp_setting(key: str, value: object) -> tuple[object, bool]:
         return str(value), False
     low, high = RUNTIME_RANGES[key]
     number = float(value)  # type: ignore[arg-type]
+    if not math.isfinite(number):
+        raise ValueError(f"{key} must be a finite number")
     clamped = min(max(number, low), high)
     result: object = round(clamped) if isinstance(default, int) else clamped
     if clamped != number:

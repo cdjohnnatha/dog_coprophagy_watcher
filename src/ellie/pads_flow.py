@@ -89,11 +89,16 @@ class PadsMixin:
                 self._spawn(self._analyse_presence(presence_id))
 
     async def _analyse_presence(self, presence_id: str, retry: bool = False) -> None:
+        if presence_id in self._inflight:
+            return
+        self._inflight.add(presence_id)
         try:
             await self._analyse_presence_inner(presence_id, retry)
-        except Exception:
+        except Exception:  # a presence must never stay ANALYSING forever
             log.exception("analysis of %s crashed", presence_id)
             await self._presence_unknown(presence_id, "analysis_failed")
+        finally:
+            self._inflight.discard(presence_id)
 
     async def _analyse_presence_inner(self, presence_id: str, retry: bool) -> None:
         directory = self.evidence.presence_dir(presence_id)
@@ -209,6 +214,9 @@ class PadsMixin:
         if presence is None or label not in ("replaced", "not_replaced"):
             log.warning("ignored pad_label command %r", data.get("presence_id"))
             return
+        if presence["state"] != "DECIDED" or presence["final_outcome"] is not None:
+            log.warning("pad_label for %s ignored: not waiting for an answer", presence["id"])
+            return  # still analysing, or already answered (a double tap)
         self.store.update_presence(presence["id"], final_outcome=label, needs_review=False)
         if label == "replaced":
             await self._record_pad_change(
@@ -226,15 +234,22 @@ class PadsMixin:
         raw = data.get("at")
         try:
             at = datetime.fromisoformat(str(raw)) if raw else self._clock()
-        except ValueError:
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=LOCAL_TZ)
+            stamp = iso(at)
+        except (ValueError, OverflowError):
             log.warning("pad_changed: invalid time %r", raw)
             return
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=LOCAL_TZ)
         if at > self._clock() + timedelta(minutes=5):
             log.warning("pad_changed: time is in the future")
             return
-        await self._record_pad_change("manual", iso(at))
+        if at < self._clock() - timedelta(days=366):
+            log.warning("pad_changed: time is too far in the past")
+            return
+        current = self.store.current_pad_change()
+        if current and stamp < current["at"]:
+            log.info("pad_changed: older than the current change, it will not become current")
+        await self._record_pad_change("manual", stamp)
 
     async def _cmd_pad_undo(self, data: dict) -> None:
         """`ellie/cmd/pad_undo`: "Não troquei"; the previous change becomes current again."""

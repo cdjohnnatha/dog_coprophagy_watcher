@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ellie"
-version = "3.2.1"
+version = "3.2.2"
 description = "Counts Ellie's pees per visit (Frigate + Gemini), Home Assistant app"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,6 +25,7 @@ dev = [
   "ruff==0.17.3",
   "jsonschema==4.26.0",
   "jinja2==3.1.6",
+  "pyyaml==6.0.3",
 ]
 
 [tool.setuptools.packages.find]
@@ -43,3 +44,7 @@ pythonpath = ["src"]
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# QA regression tests probe error paths on purpose (NaN checks, swallowed errors)
+"tests/qa_*/*" = ["PLR0124", "S110", "BLE001"]

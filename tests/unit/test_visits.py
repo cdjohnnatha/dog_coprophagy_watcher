@@ -221,3 +221,21 @@ def test_two_visits_in_the_same_second_get_different_ids(tracker, clock):
 def test_iso_is_utc_with_z():
     clock = FakeClock()
     assert iso(clock() + timedelta(hours=1, seconds=5)) == "2026-10-29T13:00:05Z"
+
+
+def test_a_left_message_closes_the_visit_even_after_frigate_went_away_and_came_back(tracker, clock):
+    tracker.tick(clock())
+    tracker.on_frigate_available(False, clock())  # forgets the counts
+    enter(tracker, clock)  # she is there, counted while Frigate was flagged offline
+    tracker.on_frigate_available(True, clock())  # forgets them again, visit still OPEN
+    clock.advance(5)
+    assert kinds(leave(tracker, clock)) == ["updated"]
+    assert tracker.active["state"] == "CLOSING"
+
+
+def test_a_visit_open_for_hours_is_closed_when_the_left_message_was_lost(tracker, clock):
+    tracker.tick(clock())
+    enter(tracker, clock)
+    tracker.on_tray_dog(0, clock())  # she left the area, but pad_zone's "0" never arrived
+    actions = run(tracker, clock, 7300, step=10)
+    assert "capture_after" in kinds(actions) and tracker.active is None

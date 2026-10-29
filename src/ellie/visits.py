@@ -16,6 +16,7 @@ the visit is handed over (`capture_after`) and the tracker is free for the next 
 """
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any, Literal
@@ -47,6 +48,7 @@ class _Visit:
     state: str = "OPEN"
     on_pad_s: float = 0.0
     capturing_since: datetime | None = None
+    open_since: datetime | None = None
 
     def row(self) -> dict[str, Any]:
         return {
@@ -74,10 +76,13 @@ class VisitTracker:
         clear_s: float = 30,
         capture_timeout_s: float = 300,
         tz: tzinfo = LOCAL_TZ,
+        max_open_s: float = 7200,
     ) -> None:
         self.merge_gap_s = merge_gap_s
         self.clear_s = clear_s
         self.capture_timeout_s = capture_timeout_s
+        self.max_open_s = max_open_s  # a lost 'left' message must not keep a visit open for ever
+        self._frigate_online = True
         self._tz = tz
         self._active: _Visit | None = None
         self._pad_dog = False
@@ -87,6 +92,7 @@ class VisitTracker:
         self._on_pad_since: datetime | None = None
         self._pending_events: list[tuple[str, datetime]] = []
         self._recent_ids: deque[str] = deque(maxlen=20)
+        self.id_taken: Callable[[str], bool] | None = None  # the store: manual visits, restarts
 
     @property
     def active(self) -> dict[str, Any] | None:
@@ -101,10 +107,11 @@ class VisitTracker:
     def on_pad_dog(self, count: int, now: datetime) -> list[Action]:
         """`frigate/pad_zone/dog`: starts, reopens or closes the visit."""
         inside = count > 0
-        if inside == self._pad_dog:
-            return []
-        self._pad_dog = inside
         visit = self._active
+        still_open = visit is not None and visit.state == "OPEN"
+        if inside == self._pad_dog and not (still_open and not inside):
+            return []  # a repeat, except a "left" for a visit we still hold open
+        self._pad_dog = inside
         if inside:
             self._clear_since = None
             if visit is None:
@@ -113,6 +120,7 @@ class VisitTracker:
             if visit.state == "OPEN":
                 return []
             visit.state, visit.entries, visit.capturing_since = "OPEN", visit.entries + 1, None
+            visit.open_since = now
             return [Action("updated", visit.row())]
         if visit is None or visit.state != "OPEN":
             return []
@@ -150,7 +158,8 @@ class VisitTracker:
         """A Frigate dog event that entered pad_zone. Keep the full id (it has a suffix)."""
         visit = self._active
         if visit is None:
-            self._pending_events.append((event_id, now))
+            if all(e != event_id for e, _ in self._pending_events):
+                self._pending_events.append((event_id, now))
             return []
         if event_id in visit.event_ids:
             return []
@@ -158,7 +167,17 @@ class VisitTracker:
         return [Action("updated", visit.row())]
 
     def on_frigate_available(self, online: bool, now: datetime) -> list[Action]:
-        """`frigate/available`: a visit we cannot watch cannot be judged."""
+        """`frigate/available`: a visit we cannot watch cannot be judged.
+
+        Frigate publishes counts only on change, so after an outage the cached counts are stale:
+        forget them on the way down and again on the way back.
+        """
+        if online == self._frigate_online:
+            return []
+        self._frigate_online = online
+        self._area_dog = self._area_person = 0
+        self._pad_dog = False
+        self._clear_since = None
         if online or self._active is None:
             return []
         return self._fail(now, "frigate_offline")
@@ -177,6 +196,10 @@ class VisitTracker:
         actions: list[Action] = []
         if visit is None:
             return actions
+        if visit.state == "OPEN" and (now - visit.open_since).total_seconds() >= self.max_open_s:
+            visit.state, visit.ended_at = "CLOSING", now  # treat it as if she had left
+            self._pad_dog = False
+            actions.append(Action("updated", visit.row()))
         if visit.state == "CLOSING" and (now - visit.ended_at).total_seconds() >= self.merge_gap_s:
             visit.state, visit.capturing_since = "CAPTURING", now
             actions.append(Action("updated", visit.row()))
@@ -196,11 +219,11 @@ class VisitTracker:
     def _new_visit(self, now: datetime) -> _Visit:
         stamp = now.astimezone(self._tz)
         visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
-        while visit_id in self._recent_ids:
+        while visit_id in self._recent_ids or (self.id_taken and self.id_taken(visit_id)):
             stamp += timedelta(seconds=1)
             visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
         self._recent_ids.append(visit_id)
-        visit = _Visit(id=visit_id, started_at=now)
+        visit = _Visit(id=visit_id, started_at=now, open_since=now)
         visit.event_ids = [e for e, _ in self._pending_events]
         self._pending_events = []
         if self._on_pad_since is not None:

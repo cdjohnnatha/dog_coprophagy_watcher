@@ -1,17 +1,12 @@
 """End-to-end flow of the service with fakes: Frigate messages in, published topics out."""
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from ellie.analysers.base import AnalyserError
-from ellie.evidence import Evidence
-from ellie.frames import FrameError, ReferenceKeeper
-from ellie.service import Service
-from ellie.store import Store
-from ellie.visits import VisitTracker
-from helpers import FakeAnalyser, FakeClock, make_jpeg, make_result, make_visit
+from ellie.frames import FrameError
+from helpers import FakeClock, build_rig, make_jpeg, make_result, make_visit
 
 EVENT = {
     "after": {
@@ -24,37 +19,7 @@ EVENT = {
 
 
 def build(tmp_path, clock, analyser=None, **overrides):
-    store = Store(str(tmp_path / "ellie.db"))
-    published: list[tuple[str, object, bool]] = []
-
-    async def publish(topic, payload, retain):
-        is_json = isinstance(payload, str) and payload.startswith(("{", "["))
-        body = json.loads(payload) if is_json else payload
-        published.append((topic, body, retain))
-
-    async def fetch_frame():
-        return make_jpeg((120, 120, 120))
-
-    async def fetch_snapshot(event_id):
-        return make_jpeg((90, 90, 90))
-
-    analyser = analyser or FakeAnalyser(id="gemini:pee_v1")
-    parts = {
-        "store": store,
-        "evidence": Evidence(tmp_path / "media"),
-        "reference": ReferenceKeeper(tmp_path / "ref", clock),
-        "tracker": VisitTracker(),
-        "analysers": {analyser.id: analyser},
-        "fetch_frame": fetch_frame,
-        "fetch_snapshot": fetch_snapshot,
-        "crop": lambda jpeg: jpeg,
-        "publish": publish,
-        "clock": clock,
-        **overrides,
-    }
-    service = Service(**parts)
-    return SimpleNamespace(service=service, store=store, published=published, analyser=analyser,
-                           evidence=parts["evidence"], reference=parts["reference"], clock=clock)  # fmt: skip
+    return build_rig(tmp_path, clock, analyser, **overrides)
 
 
 @pytest.fixture

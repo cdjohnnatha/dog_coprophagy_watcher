@@ -86,7 +86,7 @@ def build_state(
             "deciding_analyser": last_visit["deciding_analyser"],
         },
         "review_queue": {
-            "count": len(queue),
+            "count": store.review_count(),
             "items": [
                 {
                     "visit_id": v["id"],

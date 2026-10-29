@@ -8,6 +8,8 @@ runs in tests without MQTT, the camera or the network. Commands from Home Assist
 import asyncio
 import json
 import logging
+import re
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime, timedelta
@@ -29,6 +31,10 @@ from ellie.visits import Action, VisitTracker, iso
 log = logging.getLogger(__name__)
 
 Publish = Callable[[str, str | bytes, bool], Awaitable[object]]
+EVENT_ID = re.compile(
+    r"^[0-9]+\.[0-9]+-[A-Za-z0-9]+$"
+)  # Frigate event id, e.g. 1793288511.990085-yohln0
+MAX_BACKDATE_DAYS = 366  # manual entries and pad changes older than this are rejected
 LABEL_CHANNELS = ("notification", "dashboard")
 REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference frame is kept
 ALERT_EVERY_S = 6 * 3600
@@ -63,6 +69,17 @@ FIXABLE = {
         "Confira a chave nas opções do app.",
     ),
 }
+
+
+def _placeholder_jpeg() -> bytes:
+    """A flat grey picture for "no photo for this pee" (manual entry, nothing counted yet)."""
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (640, 360), (70, 70, 70)).save(out, "JPEG", quality=60)
+    return out.getvalue()
 
 
 class Service(PadsMixin):
@@ -100,8 +117,10 @@ class Service(PadsMixin):
             for key, default in RUNTIME_DEFAULTS.items()
         }
         self.tracker.merge_gap_s = self.cfg["merge_gap_s"]
+        self.tracker.id_taken = lambda i: self.store.get_visit(i) is not None
         self._download_clip = download_clip
         self.presence = presence or PresenceTracker()
+        self.presence.id_taken = lambda i: self.store.get_presence(i) is not None
         self.commands: dict[str, Callable[[dict], Awaitable[None]]] = {
             "label": self._cmd_label,
             "manual_pee": self._cmd_manual_pee,
@@ -114,6 +133,7 @@ class Service(PadsMixin):
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
         self._last_purge: date | None = None
+        self._inflight: set[str] = set()  # visit/presence ids with an analysis running
         self._image_keys: dict[str, str] = {}
 
     # --- MQTT entry points ---
@@ -143,9 +163,14 @@ class Service(PadsMixin):
             event_id = self._dog_event_id(payload)
             actions = self.tracker.on_event(event_id, now) if event_id else []
         elif topic == "frigate/available":
-            actions = self.tracker.on_frigate_available(payload.decode().strip() == "online", now)
+            actions = self.tracker.on_frigate_available(
+                payload.decode(errors="replace").strip() == "online", now
+            )
+            self.presence.reset(now)
         elif topic.startswith("ellie/set/"):
-            await self.on_set(topic.removeprefix("ellie/set/"), payload.decode().strip())
+            await self.on_set(
+                topic.removeprefix("ellie/set/"), payload.decode(errors="replace").strip()
+            )
         elif topic.startswith("ellie/cmd/"):
             await self.on_command(topic.removeprefix("ellie/cmd/"), payload)
         await self._apply(actions)
@@ -162,7 +187,7 @@ class Service(PadsMixin):
         if self.tracker.active is None and self.tracker.clear_for(now) >= REFERENCE_CLEAR_S:
             try:
                 self.reference.update(self._crop(await self._fetch_frame()))
-            except FrameError as exc:
+            except (FrameError, OSError) as exc:
                 log.warning("reference refresh failed: %s", exc)
         Counting(self.store).resolve_overdue_uncertain(now)
         local = now.astimezone(LOCAL_TZ)
@@ -216,7 +241,7 @@ class Service(PadsMixin):
             return
         try:
             data = json.loads(payload or b"{}")
-        except json.JSONDecodeError:
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError
             log.warning("command %s: payload is not JSON", name)
             return
         if not isinstance(data, dict):
@@ -234,21 +259,24 @@ class Service(PadsMixin):
         if visit is None or label not in ("pee", "no_pee") or channel not in LABEL_CHANNELS:
             log.warning("ignored label command %r", {k: data.get(k) for k in ("visit_id", "label")})
             return
-        await self._apply_label(visit, label, channel, data.get("by"))
+        await self._apply_label(visit, label, channel, self._by(data))
 
     async def _cmd_manual_pee(self, data: dict) -> None:
         """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
         try:
             at = datetime.fromisoformat(str(data.get("at")))
-        except ValueError:
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=LOCAL_TZ)
+            stamp = at.astimezone(LOCAL_TZ)
+        except (ValueError, OverflowError):
             log.warning("manual_pee: invalid time %r", data.get("at"))
             return
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=LOCAL_TZ)
         if at > self._clock() + timedelta(minutes=5):
             log.warning("manual_pee: time is in the future")
             return
-        stamp = at.astimezone(LOCAL_TZ)
+        if at < self._clock() - timedelta(days=MAX_BACKDATE_DAYS):
+            log.warning("manual_pee: time is too far in the past")
+            return
         visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
         while self.store.get_visit(visit_id):
             stamp += timedelta(seconds=1)
@@ -269,7 +297,7 @@ class Service(PadsMixin):
                 "needs_review": False,
             }
         )
-        self.store.insert_label(visit_id, "pee", "manual_add", data.get("by"), None)
+        self.store.insert_label(visit_id, "pee", "manual_add", self._by(data), None)
         await self._visit_decided(visit_id, None)
 
     async def _cmd_reject_last(self, data: dict) -> None:
@@ -279,17 +307,21 @@ class Service(PadsMixin):
         if last is None or local_date(last["started_at"]) != local_date(iso(now)):
             log.warning("reject_last: no counted pee today")
             return
-        await self._apply_label(last, "no_pee", "reject_last", data.get("by"))
+        await self._apply_label(last, "no_pee", "reject_last", self._by(data))
 
     async def _cmd_reanalyse(self, data: dict) -> None:
         """`ellie/cmd/reanalyse`: run the deciding analyser again on the stored images."""
-        visit = self.store.get_visit(data.get("visit_id")) if data.get("visit_id") else None
+        visit_id = data.get("visit_id")
+        visit = self.store.get_visit(visit_id) if isinstance(visit_id, str) and visit_id else None
         if visit is None:
             log.warning("reanalyse: unknown visit")
             return
         directory = self.evidence.visit_dir(visit["id"])
         if not (directory / "before.jpg").exists() or not (directory / "after.jpg").exists():
             log.warning("reanalyse %s: the stored images are missing", visit["id"])
+            return
+        if visit["id"] in self._inflight:
+            log.info("reanalyse %s: an analysis is already running", visit["id"])
             return
         failed = visit["final_outcome"] == "unknown" and not self.store.labels_for(visit["id"])
         if failed:  # never decided: this is a retry
@@ -300,6 +332,9 @@ class Service(PadsMixin):
 
     async def _apply_label(self, visit: dict, label: str, channel: str, by: str | None) -> None:
         visit_id = visit["id"]
+        if visit["state"] not in ("DECIDED", "LABELLED"):
+            log.warning("label for %s ignored: the visit is still %s", visit_id, visit["state"])
+            return
         self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"])
         self.store.update_visit(visit_id, final_outcome=label, needs_review=False, state="LABELLED")
         visit = self.store.get_visit(visit_id)
@@ -313,6 +348,15 @@ class Service(PadsMixin):
         await self._visit_decided(visit_id, None)
 
     async def _rerun(self, visit_id: str) -> None:
+        if visit_id in self._inflight:
+            return
+        self._inflight.add(visit_id)
+        try:
+            await self._rerun_inner(visit_id)
+        finally:
+            self._inflight.discard(visit_id)
+
+    async def _rerun_inner(self, visit_id: str) -> None:
         analyser = self.analysers.get(self.cfg["deciding_analyser"])
         directory = self.evidence.visit_dir(visit_id)
         if analyser is None:
@@ -340,15 +384,18 @@ class Service(PadsMixin):
     async def _apply(self, actions: list[Action]) -> None:
         for action in actions:
             visit = action.visit
-            if action.kind == "started":
-                self._insert_started(visit)
-            elif action.kind in ("updated", "capture_after"):
-                self._update_tracked(visit)
-                if action.kind == "capture_after":
-                    self._spawn(self._analyse(visit["id"]))
-            elif action.kind == "unknown":
-                self._update_tracked(visit)
-                await self._fail(visit["id"], action.reason or "analysis_failed")
+            if action.kind == "capture_after":
+                self._spawn(self._analyse(visit["id"]))  # first: a store error must not strand it
+            try:
+                if action.kind == "started":
+                    self._insert_started(visit)
+                elif action.kind in ("updated", "capture_after"):
+                    self._update_tracked(visit)
+                elif action.kind == "unknown":
+                    self._update_tracked(visit)
+                    await self._fail(visit["id"], action.reason or "analysis_failed")
+            except sqlite3.Error:
+                log.exception("could not persist %s for %s", action.kind, visit["id"])
         if actions:
             await self.publish_state()
 
@@ -368,11 +415,17 @@ class Service(PadsMixin):
         self.store.update_visit(visit["id"], **fields)
 
     async def _analyse(self, visit_id: str, retry: bool = False) -> None:
+        if visit_id in self._inflight:
+            log.info("analysis of %s already running, skipped", visit_id)
+            return
+        self._inflight.add(visit_id)
         try:
             await self._analyse_inner(visit_id, retry)
-        except Exception:
+        except Exception:  # a visit must never stay ANALYSING forever
             log.exception("analysis of %s crashed", visit_id)
             await self._fail(visit_id, "analysis_failed")
+        finally:
+            self._inflight.discard(visit_id)
 
     async def _analyse_inner(self, visit_id: str, retry: bool) -> None:
         directory = self.evidence.visit_dir(visit_id)
@@ -394,7 +447,12 @@ class Service(PadsMixin):
         events = self.store.get_visit(visit_id)["frigate_event_ids"]
         during = await self._fetch_snapshot(events[0]) if events else None
         if during:
-            self.evidence.write(directory / "during.jpg", during)
+            try:
+                self.evidence.write(directory / "during.jpg", during)
+            except OSError:
+                log.warning(
+                    "could not store the during photo of %s, analysing without it", visit_id
+                )
 
         started = time.monotonic()
         try:
@@ -411,16 +469,19 @@ class Service(PadsMixin):
                                    result.model_dump(exclude_none=True), outcome,
                                    int((time.monotonic() - started) * 1000), None, usage)  # fmt: skip
         decided = outcome in ("pee", "no_pee")
-        self.store.update_visit(
-            visit_id,
-            state="DECIDED",
-            auto_outcome=outcome,
-            final_outcome=outcome if decided else None,
-            poop_observed=result.poop,
-            reason=result.reason,
-            needs_review=(not decided) or bool(self.cfg["validation_mode"]),
-            deciding_analyser=analyser.id,
-        )
+        fields = {
+            "auto_outcome": outcome,
+            "poop_observed": result.poop,
+            "reason": result.reason,
+            "deciding_analyser": analyser.id,
+        }
+        if not self.store.labels_for(visit_id):  # an owner's answer always wins
+            fields |= {
+                "state": "DECIDED",
+                "final_outcome": outcome if decided else None,
+                "needs_review": (not decided) or bool(self.cfg["validation_mode"]),
+            }
+        self.store.update_visit(visit_id, **fields)
         visit = self.store.get_visit(visit_id)
         if (
             result.pad_replaced and visit["person_present"]
@@ -430,6 +491,8 @@ class Service(PadsMixin):
             )
         if result.poop != "none" and events and self._download_clip:
             self._spawn(self._download_clip(events[0], visit_id))  # raw material for spec 004/005
+        if retry and decided:
+            await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
         await self._visit_decided(visit_id, "uncertain" if outcome == "uncertain" else None)
 
     @staticmethod
@@ -447,6 +510,14 @@ class Service(PadsMixin):
         return "analysis_failed"
 
     async def _fail(self, visit_id: str, code: str) -> None:
+        current = self.store.get_visit(visit_id)
+        if (
+            current
+            and current["state"] in ("DECIDED", "LABELLED")
+            and current["auto_outcome"] not in (None, "unknown")
+        ):
+            log.warning("visit %s was already decided, not turning it into unknown", visit_id)
+            return
         self.store.update_visit(
             visit_id,
             state="DECIDED",
@@ -527,12 +598,15 @@ class Service(PadsMixin):
             topics["review_after"]: (current and current["visit_id"], "after.jpg"),
         }
         for topic, (visit_id, name) in wanted.items():
-            if not visit_id or self._image_keys.get(topic) == visit_id:
+            path = self.evidence.visit_dir(visit_id) / name if visit_id else None
+            has_photo = path is not None and path.exists()
+            if topic == topics["last_pee_photo"] and not has_photo:
+                visit_id, has_photo = "placeholder", True  # a manual or undone pee has no photo
+                path = None
+            if not visit_id or self._image_keys.get(topic) == visit_id or not has_photo:
                 continue
-            path = self.evidence.visit_dir(visit_id) / name
-            if path.exists():
-                self._image_keys[topic] = visit_id
-                await self._publish(topic, path.read_bytes(), True)
+            self._image_keys[topic] = visit_id
+            await self._publish(topic, path.read_bytes() if path else _placeholder_jpeg(), True)
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> None:
         await self._publish_fn(topic, payload, retain)
@@ -543,10 +617,16 @@ class Service(PadsMixin):
         task.add_done_callback(self._tasks.discard)
 
     @staticmethod
+    def _by(data: dict) -> str | None:
+        """Who answered: only a short string is kept (the field is informational)."""
+        by = data.get("by")
+        return by[:80] if isinstance(by, str) else None
+
+    @staticmethod
     def _count(payload: bytes, handler: Callable[[int], list[Action]]) -> list[Action]:
         try:
             count = int(float(payload.decode().strip()))
-        except ValueError:
+        except (ValueError, OverflowError):
             log.warning("ignored non-numeric count %r", payload[:20])
             return []
         return handler(count)
@@ -554,10 +634,12 @@ class Service(PadsMixin):
     def _dog_event_id(self, payload: bytes) -> str | None:
         try:
             after = (json.loads(payload) or {}).get("after") or {}
-        except (json.JSONDecodeError, AttributeError):
+            if after.get("camera") != self.camera or after.get("label") != "dog":
+                return None
+            if "pad_zone" not in (after.get("entered_zones") or []):
+                return None
+            event_id = after.get("id")
+        except (ValueError, AttributeError, TypeError):  # not JSON, not UTF-8, wrong shape
             return None
-        if after.get("camera") != self.camera or after.get("label") != "dog":
-            return None
-        if "pad_zone" not in (after.get("entered_zones") or []):
-            return None
-        return after.get("id")
+        # the id ends up in a Frigate API URL: accept only the shape Frigate really uses
+        return event_id if isinstance(event_id, str) and EVENT_ID.match(event_id) else None

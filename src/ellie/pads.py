@@ -6,6 +6,7 @@ it must last `min_presence_s` to be worth analysing. While a dog visit is open t
 the area (its analysis also reports `pad_replaced`), so no presence is tracked.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from typing import Any, Literal
@@ -25,8 +26,13 @@ class PresenceAction:
 
 class PresenceTracker:
     def __init__(
-        self, min_presence_s: float = 10, clear_s: float = 30, tz: tzinfo = LOCAL_TZ
+        self,
+        min_presence_s: float = 10,
+        clear_s: float = 30,
+        tz: tzinfo = LOCAL_TZ,
+        max_wait_s: float = 600,
     ) -> None:
+        self.max_wait_s = max_wait_s  # a dog idling in the area must not keep a presence open
         self.min_presence_s = min_presence_s
         self.clear_s = clear_s
         self._tz = tz
@@ -38,6 +44,7 @@ class PresenceTracker:
         self._last_person: datetime | None = None
         self._id: str | None = None
         self._used: set[str] = set()
+        self.id_taken: Callable[[str], bool] | None = None
 
     @property
     def present(self) -> bool:
@@ -63,6 +70,13 @@ class PresenceTracker:
         self._update_clear(now)
         return []
 
+    def reset(self, now: datetime) -> None:
+        """Frigate went away or came back: the cached counts are stale, so forget them."""
+        if self._person > 0 and self._started is not None:
+            self._last_person = now
+        self._person = self._dog = 0
+        self._clear_since = None
+
     def set_visit_active(self, active: bool, now: datetime) -> list[PresenceAction]:
         """A dog visit takes over: a presence in progress is dropped without analysis."""
         self._visit_active = active
@@ -73,9 +87,16 @@ class PresenceTracker:
     def tick(self, now: datetime) -> list[PresenceAction]:
         if self._clear_since is None and self._person == 0 and self._dog == 0:
             self._clear_since = now
-        if self._started is None or self._clear_since is None:
+        if self._started is None:
             return []
-        if (now - self._clear_since).total_seconds() < self.clear_s:
+        gone_for = (now - self._last_person).total_seconds() if self._person == 0 else 0
+        if self._clear_since is None and gone_for < self.max_wait_s:
+            return []
+        if (
+            self._clear_since is not None
+            and (now - self._clear_since).total_seconds() < self.clear_s
+            and gone_for < self.max_wait_s
+        ):
             return []
         stay = (self._last_person - self._started).total_seconds()
         if stay < self.min_presence_s:
@@ -109,7 +130,7 @@ class PresenceTracker:
     def _new_id(self, now: datetime) -> str:
         stamp = now.astimezone(self._tz)
         presence_id = f"s_{stamp:%Y%m%d_%H%M%S}"
-        while presence_id in self._used:
+        while presence_id in self._used or (self.id_taken and self.id_taken(presence_id)):
             stamp += timedelta(seconds=1)
             presence_id = f"s_{stamp:%Y%m%d_%H%M%S}"
         self._used.add(presence_id)
