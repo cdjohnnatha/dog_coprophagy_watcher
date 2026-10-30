@@ -186,7 +186,7 @@ async def test_a_person_during_the_visit_is_recorded(rig):
     [
         {"after": {**EVENT["after"], "camera": "garage"}},
         {"after": {**EVENT["after"], "label": "person"}},
-        {"after": {**EVENT["after"], "entered_zones": ["tray_area"]}},
+        {"after": {**EVENT["after"], "entered_zones": ["tray_pad"]}},
         {"before": {}},
     ],
 )
@@ -303,3 +303,12 @@ async def test_the_reference_is_refreshed_only_while_the_area_is_clear(rig):
     rig.clock.advance(60)
     await rig.service.minute_tasks()
     assert rig.reference.latest()[1] == stamp  # busy area: the old reference is kept
+
+
+async def test_an_event_that_only_entered_tray_area_belongs_to_the_visit(rig):
+    """2026-10-30 08:24: she was seen only in tray_area; its clip and snapshot are still evidence."""
+    await rig.service.tick()
+    await send(rig, "frigate/tray_area/dog", 1)
+    event = {"after": {**EVENT["after"], "entered_zones": ["tray_area"]}}
+    await rig.service.on_message("frigate/events", json.dumps(event).encode())
+    assert rig.service.tracker.active["frigate_event_ids"] == [EVENT["after"]["id"]]

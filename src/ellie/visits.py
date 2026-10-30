@@ -225,7 +225,9 @@ class VisitTracker:
             stamp += timedelta(seconds=1)
             visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
         self._recent_ids.append(visit_id)
-        visit = _Visit(id=visit_id, started_at=now, open_since=now)
+        # counts come only on change: a person already there sends nothing new
+        visit = _Visit(id=visit_id, started_at=now, open_since=now,
+                       person_present=self._area_person > 0)  # fmt: skip
         visit.event_ids = [e for e, _ in self._pending_events]
         self._pending_events = []
         if self._on_pad_since is not None:

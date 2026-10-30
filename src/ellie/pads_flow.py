@@ -2,7 +2,8 @@
 
 A person at the tray is analysed before/after with the pad-change prompt. Frigate sometimes labels
 Ellie herself as a person (squatting, seen from above: 2026-10-30 06:53, a poop), so a presence
-whose pad was not replaced is also asked the visit question; new pee or poop turns it into a visit. A confident
+whose pad was not replaced (by Gemini, or by the owner when Gemini was unsure) is also asked the
+visit question; new pee or poop turns it into a visit. A confident
 "replaced" restarts the countdown with no tap; unsure answers ask the owner; the owner can also
 mark a change ("Troquei agora") or undo one. Reminders live in Home Assistant (a time trigger on
 `sensor.ellie_pad_change_due`), so this module only keeps the facts.
@@ -146,14 +147,29 @@ class PadsMixin:
             )
         elif outcome != "not_replaced":
             await self._request_pad_review(presence)
-        if outcome != "replaced":  # a new pad would make "new mark" meaningless
-            await self._promote_if_eliminated(presence, before_path, after_path, analyser)
+        if outcome == "not_replaced":  # unsure: wait for the owner (a new pad fakes a "new mark")
+            await self._promote_if_eliminated(presence, analyser)
         await self.publish_state()
 
-    async def _promote_if_eliminated(
-        self, presence: dict, before_path, after_path, analyser
-    ) -> None:
-        """If the "person" left new pee or poop, it was Ellie: record it as a normal visit."""
+    async def _promote_if_eliminated(self, presence: dict, analyser) -> None:
+        """If the "person" left new pee or poop, it was Ellie: record it as a normal visit.
+
+        Runs once the pad is known not to be replaced (by Gemini or by the owner). A failure here
+        must not undo the pad decision nor leave a visit ANALYSING.
+        """
+        directory = self.evidence.presence_dir(presence["id"])
+        before_path, after_path = directory / "before.jpg", directory / "after.jpg"
+        if not (before_path.exists() and after_path.exists()):
+            return
+        created: list[str] = []
+        try:
+            await self._promote(presence, before_path, after_path, analyser, created)
+        except Exception:
+            log.exception("promotion of presence %s failed", presence["id"])
+            if created:
+                await self._fail(created[0], "analysis_failed")
+
+    async def _promote(self, presence: dict, before_path, after_path, analyser, created) -> None:
         try:
             result = await analyser.analyse(before_path.read_bytes(), after_path.read_bytes(), None)
         except AnalyserError as exc:
@@ -188,6 +204,7 @@ class PadsMixin:
                 "needs_review": False,
             }
         )
+        created.append(visit_id)
         directory = self.evidence.visit_dir(visit_id)
         self.evidence.write(directory / "before.jpg", before_path.read_bytes())
         self.evidence.write(directory / "after.jpg", after_path.read_bytes())
@@ -292,6 +309,10 @@ class PadsMixin:
                 presence["ended_at"] or presence["started_at"],
                 presence_id=presence["id"],
             )
+        else:  # the pad stayed: a new mark on it was made by Ellie (seen as a person)
+            analyser = self.analysers.get(self.cfg["deciding_analyser"])
+            if analyser is not None and hasattr(analyser, "analyse"):
+                self._spawn(self._promote_if_eliminated(presence, analyser))
         await self._publish(
             "ellie/review/resolved", json.dumps({"visit_id": presence["id"]}), False
         )

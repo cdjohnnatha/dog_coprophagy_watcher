@@ -640,7 +640,7 @@ class Service(PadsMixin):
             after = (json.loads(payload) or {}).get("after") or {}
             if after.get("camera") != self.camera or after.get("label") != "dog":
                 return None
-            if "pad_zone" not in (after.get("entered_zones") or []):
+            if not {"pad_zone", "tray_area"} & set(after.get("entered_zones") or []):
                 return None
             event_id = after.get("id")
         except (ValueError, AttributeError, TypeError):  # not JSON, not UTF-8, wrong shape
