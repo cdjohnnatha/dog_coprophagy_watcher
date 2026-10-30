@@ -21,3 +21,4 @@ These drafts belong to spec [003-ellie-pee-counter](../spec.md). The first imple
 | [0008](0008-gemini-credit-alerts.md) | Tell the owner when the Gemini credit ends | accepted (2026-10-29) |
 | [0009](0009-reopen-visit-and-debounce.md) | A re-entry before the after photo reopens the visit; every decision is debounced | accepted (2026-10-29) |
 | [0010](0010-frigate-tray-pad-zone.md) | Extra Frigate zone tray_pad and the on_pad_s evidence | accepted (2026-10-29) |
+| [0011](0011-activity-at-the-tray-triggers-analysis.md) | Any activity at the tray is analysed, not only a "dog in pad_zone" | accepted (2026-10-30) |

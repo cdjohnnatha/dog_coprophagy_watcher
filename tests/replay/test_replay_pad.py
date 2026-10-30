@@ -6,7 +6,7 @@ import pytest
 from test_replay_visit import build, last_state, one_visit, topics
 
 from ellie.analysers.base import AnalyserError
-from helpers import FakeClock, make_jpeg, make_pad_result
+from helpers import FakeClock, make_jpeg, make_pad_result, make_result
 
 
 @pytest.fixture
@@ -184,9 +184,11 @@ async def test_bad_pad_commands_are_ignored(rig):
 
 async def test_presence_analyses_are_billed_in_the_monthly_usage(rig):
     rig.analyser.last_usage = {"in": 1000, "out": 100}
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.9))  # nothing new on the pad
     await person_at_the_tray(rig)
     usage = last_state(rig)["analysis_calls"]
-    assert usage["calls"] == 1 and usage["tokens_in"] == 1000
+    # two Gemini questions per presence (pad changed? new pee/poop?), billed on the presence
+    assert usage["calls"] == 1 and usage["tokens_in"] == 2000
 
 
 async def test_restart_recovery_for_presences(rig):

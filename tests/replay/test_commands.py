@@ -1,7 +1,6 @@
 """Owner commands (labels, manual entries, undo, reanalyse) and what hangs off them."""
 
 import json
-from datetime import timedelta
 
 import pytest
 from test_replay_visit import EVENT, advance, build, last_state, one_visit, topics
@@ -233,15 +232,42 @@ async def test_accuracy_and_corrections_show_up_in_the_state(rig):
     assert today["visits"] == 2 and today["corrected"] == 1
 
 
-async def test_a_visit_started_by_a_person_only_never_becomes_a_pee(rig):
-    # a person at the tray (pad change) is not a dog visit: no visit row, no analysis
+async def test_a_person_at_the_tray_is_not_a_pee_when_nothing_new_appears(rig):
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.9))  # no new mark
     await rig.service.tick()
     await rig.service.on_message("frigate/tray_area/person", b"1")
     await advance(rig, 120)
     await rig.service.on_message("frigate/tray_area/person", b"0")
     await advance(rig, 120)
-    assert visits(rig) == [] and rig.analyser.calls == []
-    assert rig.clock() - timedelta(minutes=5) < rig.clock()
+    assert visits(rig) == []
+
+
+async def test_a_person_that_leaves_poop_was_ellie_and_becomes_a_visit(rig):
+    """2026-10-30 06:53: Frigate labelled Ellie, squatting, as a person (74 %) while she pooped."""
+    rig.analyser.script(
+        make_result(pee=False, pee_confidence=0.9, poop="on_pad", poop_confidence=0.9)
+    )
+    await rig.service.tick()
+    await rig.service.on_message("frigate/tray_area/person", b"1")
+    await advance(rig, 14)
+    await rig.service.on_message("frigate/tray_area/person", b"0")
+    await advance(rig, 40)
+    (visit,) = visits(rig)
+    assert visit["poop_observed"] == "on_pad" and visit["final_outcome"] == "no_pee"
+    assert visit["person_present"] is True and last_state(rig)["pee_today"] == 0
+    directory = rig.evidence.visit_dir(visit["id"])
+    assert (directory / "before.jpg").exists() and (directory / "after.jpg").exists()
+
+
+async def test_a_person_that_leaves_a_new_pee_mark_is_counted(rig):
+    rig.analyser.script(make_result(pee=True, pee_confidence=0.95))
+    await rig.service.tick()
+    await rig.service.on_message("frigate/tray_area/person", b"1")
+    await advance(rig, 20)
+    await rig.service.on_message("frigate/tray_area/person", b"0")
+    await advance(rig, 40)
+    (visit,) = visits(rig)
+    assert visit["final_outcome"] == "pee" and last_state(rig)["pee_today"] == 1
 
 
 async def test_photos_go_to_the_image_entities_only_when_they_change(rig):

@@ -1,6 +1,8 @@
 """Pad change flow of the service (US7), mixed into `Service`.
 
-A person at the tray is analysed before/after with the pad-change prompt. A confident
+A person at the tray is analysed before/after with the pad-change prompt. Frigate sometimes labels
+Ellie herself as a person (squatting, seen from above: 2026-10-30 06:53, a poop), so a presence
+whose pad was not replaced is also asked the visit question; new pee or poop turns it into a visit. A confident
 "replaced" restarts the countdown with no tap; unsure answers ask the owner; the owner can also
 mark a change ("Troquei agora") or undo one. Reminders live in Home Assistant (a time trigger on
 `sensor.ellie_pad_change_due`), so this module only keeps the facts.
@@ -14,7 +16,7 @@ from typing import Any
 
 from ellie.analysers.base import AnalyserError
 from ellie.counting import LOCAL_TZ
-from ellie.decide import decide_pad_change
+from ellie.decide import decide_pad_change, decide_visit
 from ellie.frames import FrameError
 from ellie.pads import PresenceAction
 from ellie.state import local_text
@@ -144,7 +146,73 @@ class PadsMixin:
             )
         elif outcome != "not_replaced":
             await self._request_pad_review(presence)
+        if outcome != "replaced":  # a new pad would make "new mark" meaningless
+            await self._promote_if_eliminated(presence, before_path, after_path, analyser)
         await self.publish_state()
+
+    async def _promote_if_eliminated(
+        self, presence: dict, before_path, after_path, analyser
+    ) -> None:
+        """If the "person" left new pee or poop, it was Ellie: record it as a normal visit."""
+        try:
+            result = await analyser.analyse(before_path.read_bytes(), after_path.read_bytes(), None)
+        except AnalyserError as exc:
+            log.warning("presence %s: elimination check failed: %s", presence["id"], exc)
+            return
+        peed = result.pee and result.pee_confidence >= 0.5
+        pooped = result.poop in ("on_pad", "beside_tray")
+        if not (peed or pooped):
+            # nothing new: bill this second call to the presence (a promoted visit bills itself)
+            usage = getattr(analyser, "last_usage", None) or {}
+            spent = self.store.get_presence(presence["id"])["cost_units"] or {}
+            self.store.update_presence(
+                presence["id"],
+                cost_units={k: int(spent.get(k, 0)) + int(usage.get(k, 0)) for k in ("in", "out")},
+            )
+            return
+        stamp = datetime.fromisoformat(presence["started_at"]).astimezone(LOCAL_TZ)
+        visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        while self.store.get_visit(visit_id):
+            stamp += timedelta(seconds=1)
+            visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        self.store.insert_visit(
+            {
+                "id": visit_id,
+                "source": "auto",
+                "started_at": presence["started_at"],
+                "ended_at": presence["ended_at"],
+                "entries": 1,
+                "person_present": True,
+                "frigate_event_ids": [],
+                "state": "ANALYSING",
+                "needs_review": False,
+            }
+        )
+        directory = self.evidence.visit_dir(visit_id)
+        self.evidence.write(directory / "before.jpg", before_path.read_bytes())
+        self.evidence.write(directory / "after.jpg", after_path.read_bytes())
+        outcome = decide_visit(result, self.cfg["confidence_threshold"])
+        self.store.insert_analysis(visit_id, analyser.id, "deciding",
+                                   result.model_dump(exclude_none=True), outcome, None, None,
+                                   getattr(analyser, "last_usage", None))  # fmt: skip
+        decided = outcome in ("pee", "no_pee")
+        self.store.update_visit(
+            visit_id,
+            state="DECIDED",
+            auto_outcome=outcome,
+            final_outcome=outcome if decided else None,
+            poop_observed=result.poop,
+            reason=result.reason,
+            needs_review=(not decided) or bool(self.cfg["validation_mode"]),
+            deciding_analyser=analyser.id,
+        )
+        log.info(
+            "presence %s became visit %s: %s (Frigate saw a person)",
+            presence["id"],
+            visit_id,
+            outcome,
+        )
+        await self._visit_decided(visit_id, "uncertain" if outcome == "uncertain" else None)
 
     async def _presence_unknown(self, presence_id: str, code: str) -> None:
         reason = PAD_REASONS.get(code) or self._reason_text(code)

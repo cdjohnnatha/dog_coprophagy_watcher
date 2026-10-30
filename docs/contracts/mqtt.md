@@ -6,7 +6,7 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 
 | Topic | Payload | Use |
 |---|---|---|
-| `frigate/pad_zone/dog` | int (count) | Visit start (`>0`) / exit (`0`) |
+| `frigate/pad_zone/dog` | int (count) | With `tray_area/dog`: she is at the tray when either is `>0`; the visit closes when both are 0 (ADR-0011) |
 | `frigate/tray_area/dog`, `frigate/tray_area/person` | int | `person_present` flag and "area clear" for before/after frames. `person > 0` with no dog visit open starts a person presence (US7, research R14) |
 | `frigate/tray_pad/dog` | int | Seconds on the pad itself (`on_pad_s`). Zone tight around the tray, added 2026-10-29 |
 | `frigate/events` | Frigate event JSON | `after.camera == "ellie"`, `after.label == "dog"`, `"pad_zone" in after.entered_zones` → append `after.id` to the open visit |

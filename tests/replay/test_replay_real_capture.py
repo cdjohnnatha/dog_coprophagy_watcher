@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from test_replay_visit import build, last_state
 
-from helpers import FakeClock, make_jpeg
+from helpers import FakeClock, make_jpeg, make_result
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mqtt_walkthrough_2026-10-29.tsv"
 
@@ -29,12 +29,15 @@ async def replayed(tmp_path):
     first = next(messages())[0]
     clock = FakeClock(first.replace(second=first.second - 5 if first.second >= 5 else 0))
     rig = build(tmp_path, clock)
+    # first Gemini question: the owner's presence (nothing new); then Ellie's visit (a pee)
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.9), make_result())
     rig.reference.update(make_jpeg((200, 200, 200)))
     await rig.service.tick()
     for moment, topic, payload in messages():
         while clock() < moment:  # one tick per second, like the real service
             clock.advance(1)
             await rig.service.tick()
+            await rig.service.wait_idle()  # analyses finish in timeline order, as in real time
         await rig.service.on_message(topic, payload)
     for _ in range(200):
         clock.advance(1)
@@ -56,7 +59,7 @@ def presences(rig):
 async def test_ellie_is_one_visit_despite_the_flapping_zone(replayed):
     (visit,) = visits(replayed)
     assert visit["started_at"] == "2026-10-29T15:41:52Z"
-    assert visit["entries"] == 2  # pad_zone/dog went 1, 0, 1, 0 inside four seconds
+    assert visit["entries"] == 1  # pad_zone/dog flapped, but tray_area/dog stayed 1 throughout
     assert visit["person_present"] is True  # the owner was beside the tray
     assert visit["frigate_event_ids"] == [
         "1793288511.990085-yohln0"
@@ -69,7 +72,7 @@ async def test_ellie_is_one_visit_despite_the_flapping_zone(replayed):
 async def test_the_after_photo_waits_for_the_area_to_be_really_clear(replayed):
     # last person flap 15:42:04 + 30 s clear = 15:42:34; the merge gap after her last exit
     # (15:41:56 + 60 s = 15:42:56) is what finally allows the capture
-    assert len(replayed.analyser.calls) == 1
+    assert len(replayed.analyser.calls) == 2  # the presence check, then the visit
     (visit,) = visits(replayed)
     assert (replayed.evidence.visit_dir(visit["id"]) / "after.jpg").exists()
 

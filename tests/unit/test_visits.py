@@ -37,9 +37,7 @@ def enter(tracker, clock):
 
 
 def leave(tracker, clock):
-    actions = tracker.on_pad_dog(0, clock())
-    tracker.on_tray_dog(0, clock())
-    return actions
+    return tracker.on_pad_dog(0, clock()) + tracker.on_tray_dog(0, clock())
 
 
 def test_single_visit_from_entry_to_capture(tracker, clock):
@@ -138,16 +136,36 @@ def test_flapping_counts_do_not_trigger_an_early_capture(tracker, clock):
     assert kinds(actions).count("capture_after") == 1
 
 
-def test_dog_still_in_tray_area_delays_the_capture(tracker, clock):
+def test_a_dog_still_in_tray_area_keeps_the_visit_open(tracker, clock):
     tracker.tick(clock())
     enter(tracker, clock)
     clock.advance(2)
-    tracker.on_pad_dog(0, clock())  # pad_zone says she left, tray_area says she is still near
+    tracker.on_pad_dog(0, clock())  # pad_zone says she left, tray_area says she is still here
     actions = run(tracker, clock, 90)
-    assert "capture_after" not in kinds(actions)
+    assert "capture_after" not in kinds(actions) and tracker.active["state"] == "OPEN"
     tracker.on_tray_dog(0, clock())
-    actions = run(tracker, clock, 31)
+    actions = run(tracker, clock, 61)  # merge gap from the moment she really left
     assert kinds(actions).count("capture_after") == 1
+
+
+def test_a_dog_only_in_front_of_the_tray_starts_a_visit(tracker, clock):
+    """2026-10-30 08:24: she peed with her feet in front of the tray; Frigate saw her only in
+    tray_area (6 s), never in pad_zone. That must be a visit."""
+    tracker.tick(clock())
+    started = tracker.on_tray_dog(1, clock())
+    assert kinds(started) == ["started"]
+    clock.advance(6)
+    tracker.on_tray_dog(0, clock())
+    actions = run(tracker, clock, 61)
+    assert kinds(actions).count("capture_after") == 1
+
+
+def test_flapping_between_the_two_zones_is_not_a_new_entry(tracker, clock):
+    tracker.tick(clock())
+    enter(tracker, clock)  # both zones 1
+    for count in (0, 1, 0, 1):
+        tracker.on_pad_dog(count, clock())  # tray_area stays 1
+    assert tracker.active["entries"] == 1 and tracker.active["state"] == "OPEN"
 
 
 def test_person_during_the_visit_is_flagged_once(tracker, clock):

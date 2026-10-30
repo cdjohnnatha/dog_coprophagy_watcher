@@ -6,8 +6,8 @@ counts flap within a second, so every "gone" or "clear" decision is debounced.
 
 One visit is active at a time:
 
-    OPEN      dog in pad_zone
-    CLOSING   dog left pad_zone, waiting `merge_gap_s` for a re-entry (she circles)
+    OPEN      dog in pad_zone or tray_area (ADR-0011)
+    CLOSING   dog left both zones, waiting `merge_gap_s` for a re-entry (she circles)
     CAPTURING gap elapsed, waiting for tray_area to be clear of dog and person for `clear_s`
 
 A re-entry while CLOSING or CAPTURING reopens the same visit: its after frame has not been
@@ -105,20 +105,28 @@ class VisitTracker:
     # --- inputs: Frigate plain count topics (never the /active variants) ---
 
     def on_pad_dog(self, count: int, now: datetime) -> list[Action]:
-        """`frigate/pad_zone/dog`: starts, reopens or closes the visit."""
-        inside = count > 0
+        """`frigate/pad_zone/dog`: one of the two signals that she is at the tray."""
+        self._pad_dog = count > 0
+        return self._dog_moved(now)
+
+    def on_tray_dog(self, count: int, now: datetime) -> list[Action]:
+        """`frigate/tray_area/dog`: the other signal. She often stands in front of the tray with
+        her feet just outside pad_zone (seen live on 2026-10-30: a pee there was missed)."""
+        self._area_dog = max(count, 0)
+        self._update_clear(now)
+        return self._dog_moved(now)
+
+    def _dog_moved(self, now: datetime) -> list[Action]:
+        """Start, reopen or close the visit from "is she in pad_zone or tray_area"."""
+        inside = self._pad_dog or self._area_dog > 0
         visit = self._active
-        still_open = visit is not None and visit.state == "OPEN"
-        if inside == self._pad_dog and not (still_open and not inside):
-            return []  # a repeat, except a "left" for a visit we still hold open
-        self._pad_dog = inside
         if inside:
             self._clear_since = None
             if visit is None:
                 self._active = visit = self._new_visit(now)
                 return [Action("started", visit.row())]
             if visit.state == "OPEN":
-                return []
+                return []  # still there (the two zones flap independently)
             visit.state, visit.entries, visit.capturing_since = "OPEN", visit.entries + 1, None
             visit.open_since = now
             return [Action("updated", visit.row())]
@@ -127,12 +135,6 @@ class VisitTracker:
         self._flush_on_pad(now)
         visit.state, visit.ended_at = "CLOSING", now
         return [Action("updated", visit.row())]
-
-    def on_tray_dog(self, count: int, now: datetime) -> list[Action]:
-        """`frigate/tray_area/dog`: she may still be around even when pad_zone says 0."""
-        self._area_dog = max(count, 0)
-        self._update_clear(now)
-        return []
 
     def on_tray_person(self, count: int, now: datetime) -> list[Action]:
         """`frigate/tray_area/person`: flags the visit and blocks the "clear" state."""
@@ -198,7 +200,7 @@ class VisitTracker:
             return actions
         if visit.state == "OPEN" and (now - visit.open_since).total_seconds() >= self.max_open_s:
             visit.state, visit.ended_at = "CLOSING", now  # treat it as if she had left
-            self._pad_dog = False
+            self._pad_dog, self._area_dog = False, 0
             actions.append(Action("updated", visit.row()))
         if visit.state == "CLOSING" and (now - visit.ended_at).total_seconds() >= self.merge_gap_s:
             visit.state, visit.capturing_since = "CAPTURING", now
