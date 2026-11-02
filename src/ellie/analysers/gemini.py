@@ -103,6 +103,8 @@ class GeminiAnalyser:
         api_key: str,
         model: str,
         *,
+        pee_prompt: str = "pee_v1",
+        thinking: str = "minimal",
         client: Any = None,
         fallback_model: str | None = None,
         timeout_s: float = 90.0,
@@ -126,7 +128,10 @@ class GeminiAnalyser:
         self._lock = (
             asyncio.Lock()
         )  # one call at a time: the quota is shared and usage is read after
-        self._pee_prompt = load_prompt("pee_v1")
+        self._thinking = thinking
+        suffix = "" if thinking == "minimal" else f"+{thinking}"
+        self.id = f"gemini:{pee_prompt}{suffix}"  # one analyser per prompt/thinking, comparable
+        self._pee_prompt = load_prompt(pee_prompt)
         self._pad_prompt = load_prompt("pad_change_v1")
         self.last_model: str | None = None
         self.last_usage: dict[str, int] = {"in": 0, "out": 0}
@@ -164,7 +169,7 @@ class GeminiAnalyser:
                                 "mime_type": "application/json",
                                 "schema": schema,
                             },
-                            generation_config={"thinking_level": "minimal"},
+                            generation_config={"thinking_level": self._thinking},
                             store=False,
                             timeout=self._timeout_s,
                         )

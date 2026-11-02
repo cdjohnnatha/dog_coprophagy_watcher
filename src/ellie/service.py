@@ -27,6 +27,7 @@ from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
 from ellie.state import build_state, local_text
 from ellie.store import Store
 from ellie.visits import Action, VisitTracker, iso
+from ellie.watch import PadWatch
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,9 @@ class Service(PadsMixin):
         version: str = "3.0.0",
         download_clip: Callable[[str, str], Awaitable[bool]] | None = None,
         presence: PresenceTracker | None = None,
+        watch: PadWatch | None = None,
     ) -> None:
+        self.watch = watch
         self.store, self.evidence, self.reference, self.tracker = (
             store,
             evidence,
@@ -187,7 +190,10 @@ class Service(PadsMixin):
         now = self._clock()
         if self.tracker.active is None and self.tracker.clear_for(now) >= REFERENCE_CLEAR_S:
             try:
-                self.reference.update(self._crop(await self._fetch_frame()))
+                crop = self._crop(await self._fetch_frame())
+                if self.watch is not None:  # compares with the previous clear crop, log only
+                    self.watch.observe(crop)
+                self.reference.update(crop)
             except (FrameError, OSError) as exc:
                 log.warning("reference refresh failed: %s", exc)
         Counting(self.store).resolve_overdue_uncertain(now)
@@ -329,7 +335,7 @@ class Service(PadsMixin):
             self.store.update_visit(visit["id"], state="ANALYSING")
             self._spawn(self._analyse(visit["id"], retry=True))
         else:  # already decided or labelled: record the new answer, change nothing else
-            self._spawn(self._rerun(visit["id"]))
+            self._spawn(self._rerun(visit["id"], data.get("analyser")))
 
     async def _apply_label(self, visit: dict, label: str, channel: str, by: str | None) -> None:
         visit_id = visit["id"]
@@ -348,17 +354,19 @@ class Service(PadsMixin):
         await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
         await self._visit_decided(visit_id, None)
 
-    async def _rerun(self, visit_id: str) -> None:
+    async def _rerun(self, visit_id: str, analyser_id: object = None) -> None:
         if visit_id in self._inflight:
             return
         self._inflight.add(visit_id)
         try:
-            await self._rerun_inner(visit_id)
+            await self._rerun_inner(visit_id, analyser_id)
         finally:
             self._inflight.discard(visit_id)
 
-    async def _rerun_inner(self, visit_id: str) -> None:
-        analyser = self.analysers.get(self.cfg["deciding_analyser"])
+    async def _rerun_inner(self, visit_id: str, analyser_id: object = None) -> None:
+        """Rerun one analyser (default: the deciding one) and keep its answer as a shadow."""
+        key = analyser_id if isinstance(analyser_id, str) else self.cfg["deciding_analyser"]
+        analyser = self.analysers.get(key)
         directory = self.evidence.visit_dir(visit_id)
         if analyser is None:
             return
@@ -374,6 +382,10 @@ class Service(PadsMixin):
             log.warning("reanalyse %s failed: %s", visit_id, exc)
             return
         outcome = decide_visit(result, self.cfg["confidence_threshold"])
+        log.info(
+            "reanalyse %s with %s: %s (pee %s %.2f) %s",
+            visit_id, analyser.id, outcome, result.pee, result.pee_confidence, result.reason,
+        )  # fmt: skip
         self.store.insert_analysis(
             visit_id, analyser.id, "shadow", result.model_dump(exclude_none=True), outcome,
             int((time.monotonic() - started) * 1000), None, getattr(analyser, "last_usage", None),
@@ -594,23 +606,53 @@ class Service(PadsMixin):
         last = state["last_pee"]
         current = (state["review_queue"]["items"] or [None])[0]
         wanted = {
-            topics["last_pee_photo"]: (last and last["visit_id"], "after.jpg"),
             topics["review_before"]: (current and current["visit_id"], "before.jpg"),
             topics["review_after"]: (current and current["visit_id"], "after.jpg"),
         }
         for topic, (visit_id, name) in wanted.items():
             path = self.evidence.visit_dir(visit_id) / name if visit_id else None
-            has_photo = path is not None and path.exists()
-            if topic == topics["last_pee_photo"] and not has_photo:
-                visit_id, has_photo = "placeholder", True  # a manual or undone pee has no photo
-                path = None
-            if not visit_id or self._image_keys.get(topic) == visit_id or not has_photo:
+            if not visit_id or self._image_keys.get(topic) == visit_id:
                 continue
-            sent = await self._publish(
-                topic, path.read_bytes() if path else _placeholder_jpeg(), True
-            )
+            if path is None or not path.exists():
+                continue
+            sent = await self._publish(topic, path.read_bytes(), True)
             if sent is not False:  # a dropped publish (no MQTT connection yet) must be retried
                 self._image_keys[topic] = visit_id
+        top = self._top_photo(last)
+        top_topic = topics["last_pee_photo"]
+        if top is not None and self._image_keys.get(top_topic) != top[0]:
+            if await self._publish(top_topic, top[1], True) is not False:
+                self._image_keys[top_topic] = top[0]
+        pad_path, _ = self.pad_photo()  # the photo of the current pad (see pads_flow.pad_photo)
+        pad_topic = topics["pad_photo"]
+        if pad_path is not None and self._image_keys.get(pad_topic) != str(pad_path):
+            if await self._publish(pad_topic, pad_path.read_bytes(), True) is not False:
+                self._image_keys[pad_topic] = str(pad_path)
+
+    def _top_photo(self, last: dict | None) -> tuple[str, bytes] | None:
+        """(key, jpeg) for the big "Foto do tapete": the latest of the last pee and a pad change.
+
+        After a pad change the clean pad replaces the stained photo until the next pee. A manual
+        mark has no photo, so it waits for a reference frame taken after the mark (the owner may
+        tap right after swapping, when the newest reference still shows the old pad).
+        """
+        change = self.store.current_pad_change()
+        if change is not None and (
+            last is None
+            or datetime.fromisoformat(change["at"]) > datetime.fromisoformat(last["at"])
+        ):
+            photo = self._change_photo(change)
+            if photo is not None:
+                return f"pad:{change['id']}", photo.read_bytes()
+            reference = self.reference.latest()
+            if reference is not None and reference[1] >= datetime.fromisoformat(change["at"]):
+                return f"pad:{change['id']}", reference[0]
+            return None  # keep what is shown; the next minute's reference will do
+        if last is not None:
+            path = self.evidence.visit_dir(last["visit_id"]) / "after.jpg"
+            if path.exists():
+                return last["visit_id"], path.read_bytes()
+        return "placeholder", _placeholder_jpeg()  # a manual or undone pee has no photo
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
         return await self._publish_fn(topic, payload, retain)

@@ -18,7 +18,7 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
                  pad_color: str | null, image: str | null, history: [...]}
 
 Commands arrive on ``ellie/set/<setting>``; availability on ``ellie/status``.
-Three image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
+Four image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
 them with its own auth, which a plain /media/local URL in a dashboard card cannot do.
 """
 
@@ -35,6 +35,7 @@ IMAGE_TOPICS = {
     "last_pee_photo": "ellie/image/last_pee",
     "review_before": "ellie/image/review_before",
     "review_after": "ellie/image/review_after",
+    "pad_photo": "ellie/image/pad",
 }
 DEVICE: dict[str, Any] = {
     "identifiers": ["ellie_v3"],
@@ -74,7 +75,15 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
         "needs_review",
         "deciding_analyser",
     ]
-    pad_keys = ["source", "days_in_use", "pees_since", "pad_color", "image", "history"]
+    pad_keys = [
+        "source",
+        "days_in_use",
+        "pees_since",
+        "pad_color",
+        "image",
+        "image_at",
+        "history",
+    ]
     lo_c, hi_c = RUNTIME_RANGES["confidence_threshold"]
     lo_m, hi_m = RUNTIME_RANGES["merge_gap_s"]
     lo_p, hi_p = RUNTIME_RANGES["pad_change_days"]
@@ -273,9 +282,10 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 {"name": name, "image_topic": IMAGE_TOPICS[obj], "content_type": "image/jpeg"},
             )
             for obj, name in (
-                ("last_pee_photo", "Foto do último xixi"),
+                ("last_pee_photo", "Foto do tapete"),
                 ("review_before", "Revisão: foto antes"),
                 ("review_after", "Revisão: foto depois"),
+                ("pad_photo", "Foto da troca do tapete"),
             )
         ],
     ]

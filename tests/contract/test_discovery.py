@@ -28,6 +28,7 @@ IDS = {
     "image.ellie_last_pee_photo",
     "image.ellie_review_before",
     "image.ellie_review_after",
+    "image.ellie_pad_photo",
 }
 ABBREV = {
     "dev",
@@ -103,6 +104,7 @@ FULL = {
         "pees_since": 7,
         "pad_color": "blue",
         "image": "p.jpg",
+        "image_at": "2026-10-27T10:00:00Z",
         "history": [],
     },
 }

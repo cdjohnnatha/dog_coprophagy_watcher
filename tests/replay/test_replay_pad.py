@@ -1,6 +1,7 @@
 """US7 end to end: a person at the tray, the pad analysis, the reminder facts and the commands."""
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from test_replay_visit import build, last_state, one_visit, topics
@@ -60,6 +61,8 @@ async def test_a_confident_replacement_restarts_the_countdown_with_no_tap(rig):
     assert pad["image"].endswith("after.jpg") and pad["changed_at"] == presence["ended_at"]
     assert pad["due_at"] == "2026-11-01T12:01:00Z"  # three days after the change
     assert topics(rig, "ellie/pad/changed")[-1]["source"] == "detected"
+    assert topics(rig, "ellie/pad/changed")[-1]["image"].endswith("after.jpg")  # for the phone notice
+    assert pad["image_at"] == pad["changed_at"]
     assert topics(rig, "ellie/review/request") == []  # a confident change is silent
 
 
@@ -201,3 +204,33 @@ async def test_restart_recovery_for_presences(rig):
     await rig.service.wait_idle()
     assert rig.store.get_presence("s_20261029_100000")["reason"] == "restart"
     assert rig.store.get_presence("s_20261029_110000")["auto_outcome"] == "not_replaced"
+
+
+async def test_a_manual_mark_after_a_detection_keeps_showing_the_detected_photo(rig):
+    rig.analyser.script_pad(make_pad_result(pad_replaced=True, pad_replaced_confidence=0.95))
+    await person_at_the_tray(rig)
+    (presence,) = presences(rig)
+    later = (datetime.fromisoformat(presence["ended_at"]) + timedelta(minutes=1)).isoformat()
+    await command(rig, "pad_changed", at=later)
+    pad = last_state(rig)["pad"]
+    assert pad["source"] == "manual" and pad["changed_at"] > presence["ended_at"]
+    assert pad["image"].endswith("after.jpg")  # the photo of the detection
+    assert pad["image_at"] == presence["ended_at"]  # and the card can say when it was taken
+    photo, photo_at = rig.service.pad_photo()  # also what the image entity shows
+    assert photo.name == "after.jpg" and photo_at == presence["ended_at"]
+
+
+async def test_the_big_photo_shows_the_clean_pad_after_a_change_until_the_next_pee(rig):
+    def big_photo() -> bytes:
+        return [b for t, b, _ in rig.published if t == "ellie/image/last_pee"][-1]
+
+    await one_visit(rig)  # a counted pee: its photo is on show
+    (visit,) = [v for v in rig.store._db.execute("SELECT id FROM visits")]
+    assert big_photo() == (rig.evidence.visit_dir(visit["id"]) / "after.jpg").read_bytes()
+    rig.analyser.script_pad(make_pad_result(pad_replaced=True, pad_replaced_confidence=0.95))
+    await person_at_the_tray(rig)
+    (presence,) = [p for p in presences(rig) if p["final_outcome"] == "replaced"]
+    clean = (rig.evidence.presence_dir(presence["id"]) / "after.jpg").read_bytes()
+    assert big_photo() == clean  # the stained photo is replaced by the clean pad
+    await command(rig, "pad_undo")
+    assert big_photo() == (rig.evidence.visit_dir(visit["id"]) / "after.jpg").read_bytes()

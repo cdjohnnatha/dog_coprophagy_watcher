@@ -13,6 +13,7 @@ import json
 import logging
 import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ellie.analysers.base import AnalyserError
@@ -43,26 +44,51 @@ class PadsMixin:
             return None  # no change known yet: no reminder, the dashboard says so
         at = datetime.fromisoformat(change["at"])
         due = at + timedelta(days=self.cfg["pad_change_days"])
-        image = None
-        for directory in (
-            self.evidence.presence_dir(change["presence_id"]) if change["presence_id"] else None,
-            self.evidence.visit_dir(change["visit_id"]) if change["visit_id"] else None,
-        ):
-            if directory is not None and (directory / "after.jpg").exists():
-                image = self.evidence.local_url(directory / "after.jpg")
+        photo, image_at = self.pad_photo()
         return {
             "changed_at": change["at"],
             "due_at": iso(due),
             "source": change["source"],
+            "image_at": image_at,
             "days_in_use": round((now - at).total_seconds() / 86400, 1),
             "pees_since": self.store.pees_since(change["at"]),
             "pad_color": change["pad_color"],
-            "image": image,
+            "image": self.evidence.local_url(photo) if photo else None,
             "history": [
                 {"id": c["id"], "at": c["at"], "source": c["source"], "undone_at": c["undone_at"]}
                 for c in self.store.pad_changes(10)
             ],
         }
+
+    def pad_photo(self) -> tuple[Path | None, str | None]:
+        """Photo of the current pad change and its time.
+
+        A manual mark has no photo of its own: use the latest photographed change (the automatic
+        detection that usually came first) and say when it was taken.
+        """
+        current = self.store.current_pad_change()
+        if current is None:
+            return None, None
+        for change in [current, *self.store.pad_changes(10)]:
+            if change["undone_at"] is None and (photo := self._change_photo(change)):
+                return photo, change["at"]
+        return None, None
+
+    def _change_photo(self, change: dict) -> Path | None:
+        """The `after.jpg` that came with a pad change, if there is one."""
+        found = None
+        for directory in (
+            self.evidence.presence_dir(change["presence_id"]) if change["presence_id"] else None,
+            self.evidence.visit_dir(change["visit_id"]) if change["visit_id"] else None,
+        ):
+            if directory is not None and (directory / "after.jpg").exists():
+                found = directory / "after.jpg"
+        return found
+
+    def _change_image(self, change: dict) -> str | None:
+        """`/media/local` URL of a pad change's photo, for notifications."""
+        photo = self._change_photo(change)
+        return self.evidence.local_url(photo) if photo else None
 
     # --- presences ---
 
@@ -287,7 +313,12 @@ class PadsMixin:
             }
         )
         log.info("pad change %s at %s (%s)", change_id, at, source)
-        message = {"pad_change_id": change_id, "at": at, "source": source}
+        message = {
+            "pad_change_id": change_id,
+            "at": at,
+            "source": source,
+            "image": self._change_image({"presence_id": presence_id, "visit_id": visit_id}),
+        }
         await self._publish("ellie/pad/changed", json.dumps(message), False)
         await self.publish_state()
         return change_id

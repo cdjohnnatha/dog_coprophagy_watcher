@@ -17,6 +17,7 @@ from ellie.service import Service
 from ellie.settings import fetch_mqtt_service, load_options
 from ellie.store import Store
 from ellie.visits import VisitTracker
+from ellie.watch import PadWatch
 
 log = logging.getLogger("ellie")
 DB_PATH = "/data/ellie.db"
@@ -48,8 +49,16 @@ async def main() -> None:
         store = Store(DB_PATH)
         analysers = {}
         if options.gemini_api_key:
-            gemini = GeminiAnalyser(options.gemini_api_key, options.gemini_model)
-            analysers[gemini.id] = gemini
+            # v1 stays the decider; the others are compared with it via `reanalyse` (ADR-0012)
+            variants = (("pee_v1", "minimal"), ("pee_v2", "minimal"), ("pee_v2", "medium"))
+            for prompt, thinking in variants:
+                gemini = GeminiAnalyser(
+                    options.gemini_api_key,
+                    options.gemini_model,
+                    pee_prompt=prompt,
+                    thinking=thinking,
+                )
+                analysers[gemini.id] = gemini
         else:
             log.warning("gemini_api_key is not set: visits will end as 'unknown'")
 
@@ -75,6 +84,7 @@ async def main() -> None:
             camera=options.camera,
             usd_to_eur=options.usd_to_eur,
             version=__version__,
+            watch=PadWatch(utcnow, MEDIA_ROOT / "watch" / "watch.csv"),
             download_clip=lambda event_id, visit_id: evidence.download_clip(
                 http, options.frigate_url, event_id, visit_id
             ),

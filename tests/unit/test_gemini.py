@@ -204,3 +204,10 @@ async def test_calls_are_serialised():
 )
 def test_classify_error(exc, expected):
     assert classify_error(exc) == expected
+
+
+def test_each_prompt_version_is_its_own_analyser_and_loads() -> None:
+    v1 = GeminiAnalyser("k", "m", client=object())
+    v2 = GeminiAnalyser("k", "m", pee_prompt="pee_v2", client=object())
+    assert (v1.id, v2.id) == ("gemini:pee_v1", "gemini:pee_v2")
+    assert "SAME spot" in v2._pee_prompt and "SAME spot" not in v1._pee_prompt

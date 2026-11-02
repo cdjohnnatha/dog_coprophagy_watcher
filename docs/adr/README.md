@@ -22,3 +22,5 @@ These drafts belong to spec [003-ellie-pee-counter](../spec.md). The first imple
 | [0009](0009-reopen-visit-and-debounce.md) | A re-entry before the after photo reopens the visit; every decision is debounced | accepted (2026-10-29) |
 | [0010](0010-frigate-tray-pad-zone.md) | Extra Frigate zone tray_pad and the on_pad_s evidence | accepted (2026-10-29) |
 | [0011](0011-activity-at-the-tray-triggers-analysis.md) | Any activity at the tray is analysed, not only a "dog in pad_zone" | accepted (2026-10-30) |
+| [0012](0012-prompt-pee-v2-and-pad-watch.md) | Prompt pee_v2 (+ thinking variant) and a log-only pad watch for pees Frigate never saw | proposed (2026-11-02) |
+| [0013](0013-big-photo-shows-the-clean-pad-after-a-change.md) | The big dashboard photo shows the clean pad after a pad change | accepted (2026-11-02) |
