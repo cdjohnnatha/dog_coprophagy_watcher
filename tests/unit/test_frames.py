@@ -138,3 +138,24 @@ def test_reference_keeper_corrupt_sidecar(tmp_path: Path) -> None:
     assert ReferenceKeeper(tmp_path, clock).latest() is None
     (tmp_path / "latest.json").write_text(json.dumps({"x": 1}))
     assert ReferenceKeeper(tmp_path, clock).age_s() is None
+
+
+async def test_fetch_frame_retries_once_after_a_500() -> None:
+    answers = [httpx.Response(500), httpx.Response(200, content=b"jpg")]
+
+    async with client(lambda req: answers.pop(0)) as c:
+        assert await fetch_frame(c, "http://g:1984", "cam", retry_delay_s=0) == b"jpg"
+    assert answers == []
+
+
+async def test_fetch_frame_gives_up_after_two_failures() -> None:
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        return httpx.Response(500)
+
+    async with client(handler) as c:
+        with pytest.raises(FrameError, match="HTTP 500"):
+            await fetch_frame(c, "http://g:1984", "cam", retry_delay_s=0)
+    assert len(calls) == 2

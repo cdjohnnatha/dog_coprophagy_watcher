@@ -94,6 +94,10 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_pad_changes_at ON pad_changes(at);
     """,
+    # 5: a "person" presence whose pee/poop check (promotion) has not finished survives a restart
+    """
+    ALTER TABLE presences ADD COLUMN promotion_pending INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 _VISIT_COLUMNS = (
@@ -126,9 +130,10 @@ _PRESENCE_COLUMNS = (
     "analysis",
     "cost_units",
     "needs_review",
+    "promotion_pending",
 )
 _PAD_CHANGE_COLUMNS = ("id", "at", "source", "presence_id", "visit_id", "pad_color", "undone_at")
-_BOOL_FIELDS = ("person_present", "needs_review", "poop_removed")
+_BOOL_FIELDS = ("person_present", "needs_review", "poop_removed", "promotion_pending")
 _JSON_FIELDS = ("frigate_event_ids", "analysis", "cost_units")
 
 
@@ -213,6 +218,18 @@ class Store:
     def get_visit(self, visit_id: str) -> dict | None:
         row = self._db.execute("SELECT * FROM visits WHERE id = ?", (visit_id,)).fetchone()
         return None if row is None else _visit_from_row(row)
+
+    def activity_between(self, start_iso: str, end_iso: str) -> bool:
+        """True if a visit or a presence overlaps [start, end] (ISO-8601 UTC strings)."""
+        for table in ("visits", "presences"):
+            sql = (
+                f"SELECT 1 FROM {table} "
+                "WHERE started_at <= ? AND COALESCE(ended_at, started_at) >= ? LIMIT 1"
+            )
+            row = self._db.execute(sql, (end_iso, start_iso)).fetchone()
+            if row is not None:
+                return True
+        return False
 
     def _visits(self, where: str, params: tuple = ()) -> list[dict]:
         sql = f"SELECT * FROM visits WHERE {where} ORDER BY started_at"
@@ -303,6 +320,10 @@ class Store:
         rows = self._db.execute("SELECT * FROM presences WHERE state IN ('PRESENT', 'ANALYSING')")
         return [self._decoded(r) for r in rows]
 
+    def pending_promotions(self) -> list[dict]:
+        rows = self._db.execute("SELECT * FROM presences WHERE promotion_pending = 1")
+        return [self._decoded(r) for r in rows]
+
     def insert_pad_change(self, change: dict) -> None:
         self._insert("pad_changes", _PAD_CHANGE_COLUMNS, change)
 
@@ -325,9 +346,14 @@ class Store:
         return {**current, "undone_at": undone_at}
 
     def pees_since(self, start_iso: str) -> int:
+        return self.pees_between(start_iso, None)
+
+    def pees_between(self, start_iso: str, end_iso: str | None) -> int:
+        """Counted pees from `start_iso` (included) to `end_iso` (excluded; None = until now)."""
         row = self._db.execute(
-            "SELECT COUNT(*) AS n FROM visits WHERE final_outcome = 'pee' AND started_at >= ?",
-            (start_iso,),
+            "SELECT COUNT(*) AS n FROM visits WHERE final_outcome = 'pee' AND started_at >= ?"
+            " AND (? IS NULL OR started_at < ?)",
+            (start_iso, end_iso, end_iso),
         ).fetchone()
         return int(row["n"])
 

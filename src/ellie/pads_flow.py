@@ -25,6 +25,7 @@ from ellie.state import local_text
 from ellie.visits import iso
 
 log = logging.getLogger(__name__)
+PADS_AVERAGED = 5  # finished pads in the "pees per pad" average
 PAD_REASONS = {
     "no_reference": "faltou a foto de antes do tabuleiro",
     "frame_error": "não consegui pegar a imagem da câmera",
@@ -45,6 +46,7 @@ class PadsMixin:
         at = datetime.fromisoformat(change["at"])
         due = at + timedelta(days=self.cfg["pad_change_days"])
         photo, image_at = self.pad_photo()
+        history = self._pad_history()
         return {
             "changed_at": change["at"],
             "due_at": iso(due),
@@ -54,11 +56,39 @@ class PadsMixin:
             "pees_since": self.store.pees_since(change["at"]),
             "pad_color": change["pad_color"],
             "image": self.evidence.local_url(photo) if photo else None,
-            "history": [
-                {"id": c["id"], "at": c["at"], "source": c["source"], "undone_at": c["undone_at"]}
-                for c in self.store.pad_changes(10)
-            ],
+            "history": history,
+            **self._pad_averages(history),
         }
+
+    def _pad_history(self) -> list[dict[str, Any]]:
+        """Newest first. `pees` is how many pees the pad took until the next (not undone) change.
+
+        Derived from the visits, not stored: an owner correction later also corrects the average.
+        The current pad has no end yet (`pees_since` says how many it has taken so far).
+        """
+        history, newer_at = [], None
+        for c in self.store.pad_changes(10):
+            counted = c["undone_at"] is None
+            pees = self.store.pees_between(c["at"], newer_at) if counted and newer_at else None
+            history.append(
+                {
+                    "id": c["id"],
+                    "at": c["at"],
+                    "source": c["source"],
+                    "undone_at": c["undone_at"],
+                    "pees": pees,
+                }
+            )
+            if counted:
+                newer_at = c["at"]
+        return history
+
+    @staticmethod
+    def _pad_averages(history: list[dict[str, Any]]) -> dict[str, Any]:
+        """Average pees of the last `PADS_AVERAGED` finished pads, once at least two exist."""
+        finished = [h["pees"] for h in history if h["pees"] is not None][:PADS_AVERAGED]
+        average = round(sum(finished) / len(finished), 1) if len(finished) >= 2 else None
+        return {"avg_pees_per_pad": average, "pads_counted": len(finished)}
 
     def pad_photo(self) -> tuple[Path | None, str | None]:
         """Photo of the current pad change and its time.
@@ -140,6 +170,8 @@ class PadsMixin:
                 return await self._presence_unknown(presence_id, "frame_error")
             self.evidence.write(after_path, after)
             self.reference.update(after)
+            if self.watch is not None:
+                self.watch.rebase(after)  # the presence explains what changed at the pad
         if not before_path.exists():
             return await self._presence_unknown(presence_id, "no_reference")
         analyser = self.analysers.get(self.cfg["deciding_analyser"])
@@ -161,6 +193,7 @@ class PadsMixin:
             analysis=result.model_dump(exclude_none=True),
             cost_units=getattr(analyser, "last_usage", None),
             needs_review=not decided,
+            promotion_pending=outcome == "not_replaced",  # cleared when the check has run
         )
         presence = self.store.get_presence(presence_id)
         log.info("presence %s: %s (%s)", presence_id, outcome, result.reason)
@@ -185,15 +218,16 @@ class PadsMixin:
         """
         directory = self.evidence.presence_dir(presence["id"])
         before_path, after_path = directory / "before.jpg", directory / "after.jpg"
-        if not (before_path.exists() and after_path.exists()):
-            return
-        created: list[str] = []
-        try:
-            await self._promote(presence, before_path, after_path, analyser, created)
-        except Exception:
-            log.exception("promotion of presence %s failed", presence["id"])
-            if created:
-                await self._fail(created[0], "analysis_failed")
+        if before_path.exists() and after_path.exists():
+            created: list[str] = []
+            try:
+                await self._promote(presence, before_path, after_path, analyser, created)
+            except Exception:
+                log.exception("promotion of presence %s failed", presence["id"])
+                if created:
+                    await self._fail(created[0], "analysis_failed")
+        # Only a restart in the middle leaves the marker set; `recover()` then runs the check again.
+        self.store.update_presence(presence["id"], promotion_pending=False)
 
     async def _promote(self, presence: dict, before_path, after_path, analyser, created) -> None:
         try:
@@ -214,6 +248,9 @@ class PadsMixin:
             return
         stamp = datetime.fromisoformat(presence["started_at"]).astimezone(LOCAL_TZ)
         visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        twin = self.store.get_visit(visit_id)
+        if twin and twin["started_at"] == presence["started_at"] and twin["person_present"]:
+            return  # a run cut short by a restart had already made this visit
         while self.store.get_visit(visit_id):
             stamp += timedelta(seconds=1)
             visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
@@ -341,6 +378,7 @@ class PadsMixin:
                 presence_id=presence["id"],
             )
         else:  # the pad stayed: a new mark on it was made by Ellie (seen as a person)
+            self.store.update_presence(presence["id"], promotion_pending=True)
             analyser = self.analysers.get(self.cfg["deciding_analyser"])
             if analyser is not None and hasattr(analyser, "analyse"):
                 self._spawn(self._promote_if_eliminated(presence, analyser))

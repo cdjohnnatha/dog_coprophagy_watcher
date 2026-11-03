@@ -19,6 +19,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | `select.ellie_deciding_analyser` | select | Tunable 3 (FR-010b). Options = analysers available |
 | `switch.ellie_validation_mode` | switch | Tunable 4 (research R9) |
 | `sensor.ellie_pad_changed_at` | sensor, `device_class: timestamp` | Current pad's change time (US7). Attr: `source`, `days_in_use`, `pees_since`, `pad_color`, `image`, `history` (last 10 changes incl. undone) |
+| `sensor.ellie_pees_per_pad` | sensor, `state_class: measurement` | Average pees of the last 5 finished pads (T096); `unknown` until 2 pads have finished. Attr: `pads_counted`. Per-pad `pees` also in `sensor.ellie_pad_changed_at` attribute `history` (newest first, `null` for the pad in use and for undone changes); derived from the visits, so an owner correction also corrects it. |
 | `sensor.ellie_pad_change_due` | sensor, `device_class: timestamp` | `changed_at + pad_change_days`. `unknown` until a first change exists |
 | `number.ellie_pad_change_days` | number 1–7 d, default 3 | Tunable 6 (FR-027) |
 | `image.ellie_last_pee_photo`, `image.ellie_review_before`, `image.ellie_review_after` | image (MQTT) | Photos for the dashboard. A `/media/local/...` URL in a card needs a signed URL, so the app sends the bytes and HA serves them with its own auth |

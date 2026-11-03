@@ -15,6 +15,7 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
     settings: {confidence_threshold: float, merge_gap_s: int, deciding_analyser: str,
                validation_mode: bool, pad_change_days: int},
     pad: null | {changed_at, due_at | null, source, days_in_use: float, pees_since: int,
+                 avg_pees_per_pad: float | null, pads_counted: int,
                  pad_color: str | null, image: str | null, history: [...]}
 
 Commands arrive on ``ellie/set/<setting>``; availability on ``ellie/status``.
@@ -79,6 +80,8 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
         "source",
         "days_in_use",
         "pees_since",
+        "avg_pees_per_pad",
+        "pads_counted",
         "pad_color",
         "image",
         "image_at",
@@ -251,6 +254,18 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 "value_template": "{{ " + _opt("pad", "changed_at") + " }}",
                 "json_attributes_topic": STATE_TOPIC,
                 "json_attributes_template": _attrs(**{k: _opt("pad", k) for k in pad_keys}),
+            },
+        ),
+        (
+            "sensor",
+            "pees_per_pad",
+            {
+                "name": "Xixis por tapete (média)",
+                "state_class": "measurement",
+                "icon": "mdi:counter",
+                "value_template": "{{ " + _opt("pad", "avg_pees_per_pad") + " }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(pads_counted=_opt("pad", "pads_counted")),
             },
         ),
         (

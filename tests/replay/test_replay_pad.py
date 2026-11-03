@@ -61,7 +61,9 @@ async def test_a_confident_replacement_restarts_the_countdown_with_no_tap(rig):
     assert pad["image"].endswith("after.jpg") and pad["changed_at"] == presence["ended_at"]
     assert pad["due_at"] == "2026-11-01T12:01:00Z"  # three days after the change
     assert topics(rig, "ellie/pad/changed")[-1]["source"] == "detected"
-    assert topics(rig, "ellie/pad/changed")[-1]["image"].endswith("after.jpg")  # for the phone notice
+    assert topics(rig, "ellie/pad/changed")[-1]["image"].endswith(
+        "after.jpg"
+    )  # for the phone notice
     assert pad["image_at"] == pad["changed_at"]
     assert topics(rig, "ellie/review/request") == []  # a confident change is silent
 
@@ -234,3 +236,55 @@ async def test_the_big_photo_shows_the_clean_pad_after_a_change_until_the_next_p
     assert big_photo() == clean  # the stained photo is replaced by the clean pad
     await command(rig, "pad_undo")
     assert big_photo() == (rig.evidence.visit_dir(visit["id"]) / "after.jpg").read_bytes()
+
+
+async def test_a_restart_between_the_pad_decision_and_the_promotion_does_not_lose_the_pee(rig):
+    """T093: the "person" left a pee; the app died after deciding "pad not replaced"."""
+    rig.store.insert_presence({"id": "s_20261102_100000", "started_at": "2026-11-02T10:00:00Z", "ended_at": "2026-11-02T10:01:00Z", "state": "DECIDED", "auto_outcome": "not_replaced", "final_outcome": "not_replaced", "promotion_pending": True})  # fmt: skip
+    directory = rig.evidence.presence_dir("s_20261102_100000")
+    rig.evidence.write(directory / "before.jpg", make_jpeg())
+    rig.evidence.write(directory / "after.jpg", make_jpeg())
+    rig.analyser.script(make_result(pee=True, pee_confidence=0.95))
+    await rig.service.recover()
+    await rig.service.wait_idle()
+    (visit,) = [v for v in one_visit_rows(rig) if v["person_present"]]
+    assert visit["final_outcome"] == "pee" and visit["started_at"] == "2026-11-02T10:00:00Z"
+    assert rig.store.get_presence("s_20261102_100000")["promotion_pending"] is False
+    await rig.service.recover()  # a second restart must not count it again
+    await rig.service.wait_idle()
+    assert len([v for v in one_visit_rows(rig) if v["person_present"]]) == 1
+    assert len(rig.analyser.calls) == 1
+
+
+def one_visit_rows(rig):
+    rows = rig.store._db.execute("SELECT id FROM visits ORDER BY id").fetchall()
+    return [rig.store.get_visit(r["id"]) for r in rows]
+
+
+def _pee(rig, n, at):
+    rig.store.insert_visit({"id": f"v_{n}", "source": "auto", "started_at": at, "ended_at": at, "entries": 1, "person_present": False, "frigate_event_ids": [], "state": "DECIDED", "final_outcome": "pee"})  # fmt: skip
+
+
+async def test_the_average_of_pees_per_finished_pad(rig):
+    """T096: pads A (3 pees) and B (1 pee) are finished, C is in use and does not count yet."""
+    for pad, at in (("a", "2026-10-20T10:00:00Z"), ("b", "2026-10-23T10:00:00Z"), ("c", "2026-10-25T10:00:00Z")):  # fmt: skip
+        rig.store.insert_pad_change({"id": f"p_{pad}", "at": at, "source": "manual"})
+    for n, at in enumerate(("2026-10-20T12:00:00Z", "2026-10-21T12:00:00Z", "2026-10-22T12:00:00Z", "2026-10-24T12:00:00Z", "2026-10-26T12:00:00Z")):  # fmt: skip
+        _pee(rig, n, at)
+    pad = rig.service.pad_state(rig.clock())
+    assert [h["pees"] for h in pad["history"]] == [
+        None,
+        1,
+        3,
+    ]  # newest first; the current pad is open
+    assert pad["pees_since"] == 1 and pad["pads_counted"] == 2 and pad["avg_pees_per_pad"] == 2.0
+
+
+async def test_one_finished_pad_is_too_few_for_an_average_and_an_undone_change_is_skipped(rig):
+    rig.store.insert_pad_change({"id": "p_a", "at": "2026-10-20T10:00:00Z", "source": "manual"})
+    rig.store.insert_pad_change({"id": "p_b", "at": "2026-10-23T10:00:00Z", "source": "manual", "undone_at": "2026-10-23T10:05:00Z"})  # fmt: skip
+    rig.store.insert_pad_change({"id": "p_c", "at": "2026-10-25T10:00:00Z", "source": "manual"})
+    _pee(rig, 1, "2026-10-24T12:00:00Z")  # falls on pad A, because B was undone
+    pad = rig.service.pad_state(rig.clock())
+    assert [h["pees"] for h in pad["history"]] == [None, None, 1]
+    assert pad["pads_counted"] == 1 and pad["avg_pees_per_pad"] is None

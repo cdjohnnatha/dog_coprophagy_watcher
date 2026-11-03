@@ -1,5 +1,6 @@
 """Frame capture, cropping and the clear-area reference frame."""
 
+import asyncio
 import io
 import json
 import logging
@@ -25,19 +26,35 @@ class FrameError(Exception):
 
 
 async def fetch_frame(
-    client: httpx.AsyncClient, go2rtc_url: str, camera: str, timeout: float = 10.0
+    client: httpx.AsyncClient,
+    go2rtc_url: str,
+    camera: str,
+    timeout: float = 10.0,
+    retry_delay_s: float = 1.0,
 ) -> bytes:
-    """Fetch a full-resolution JPEG frame from go2rtc."""
+    """Fetch a full-resolution JPEG frame from go2rtc.
+
+    go2rtc answers 500 or takes several seconds now and then (2026-11-03: the frame of the minute
+    after a pee failed), so one failed attempt is retried once before giving up.
+    """
     url = f"{go2rtc_url}/api/frame.jpeg"
-    try:
-        resp = await client.get(url, params={"src": camera}, timeout=timeout)
-    except httpx.HTTPError as exc:
-        raise FrameError(f"go2rtc request failed: {exc!r}") from exc
-    if resp.status_code != 200:
-        raise FrameError(f"go2rtc returned HTTP {resp.status_code}")
-    if not resp.content:
-        raise FrameError("go2rtc returned an empty body")
-    return resp.content
+    error = "no attempt"
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(retry_delay_s)
+        try:
+            resp = await client.get(url, params={"src": camera}, timeout=timeout)
+        except httpx.HTTPError as exc:
+            error = f"go2rtc request failed: {exc!r}"
+            continue
+        if resp.status_code != 200:
+            error = f"go2rtc returned HTTP {resp.status_code}"
+            continue
+        if not resp.content:
+            error = "go2rtc returned an empty body"
+            continue
+        return resp.content
+    raise FrameError(error)
 
 
 async def fetch_snapshot(

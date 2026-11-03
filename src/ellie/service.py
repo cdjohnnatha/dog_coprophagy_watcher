@@ -27,7 +27,7 @@ from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
 from ellie.state import build_state, local_text
 from ellie.store import Store
 from ellie.visits import Action, VisitTracker, iso
-from ellie.watch import PadWatch
+from ellie.watch import Candidate, PadWatch
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ EVENT_ID = re.compile(
 MAX_BACKDATE_DAYS = 366  # manual entries and pad changes older than this are rejected
 LABEL_CHANNELS = ("notification", "dashboard")
 REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference frame is kept
+WATCH_DAILY_CAP = 6  # visits the pad watch may open per local day (worst case about 0.008 EUR)
+WATCH_EXPLAIN_S = 180  # a visit or presence this close to a candidate already explains it
 ALERT_EVERY_S = 6 * 3600
 
 # Owner-facing reasons (Brazilian Portuguese) for visits that could not be decided.
@@ -105,6 +107,8 @@ class Service(PadsMixin):
         watch: PadWatch | None = None,
     ) -> None:
         self.watch = watch
+        self._watch_day: date | None = None
+        self._watch_opened = 0
         self.store, self.evidence, self.reference, self.tracker = (
             store,
             evidence,
@@ -191,9 +195,10 @@ class Service(PadsMixin):
         if self.tracker.active is None and self.tracker.clear_for(now) >= REFERENCE_CLEAR_S:
             try:
                 crop = self._crop(await self._fetch_frame())
-                if self.watch is not None:  # compares with the previous clear crop, log only
-                    self.watch.observe(crop)
+                confirmed = self.watch.observe(crop) if self.watch is not None else None
                 self.reference.update(crop)
+                if confirmed is not None:  # a change Frigate never reported (ADR-0012)
+                    await self._open_watch_visit(confirmed)
             except (FrameError, OSError) as exc:
                 log.warning("reference refresh failed: %s", exc)
         Counting(self.store).resolve_overdue_uncertain(now)
@@ -219,6 +224,12 @@ class Service(PadsMixin):
                 self._spawn(self._analyse_presence(presence["id"], retry=True))
             else:  # we lost track of this person: nothing to judge
                 self.store.update_presence(presence["id"], state="DECIDED", reason="restart")
+        analyser = self.analysers.get(self.cfg["deciding_analyser"])
+        for presence in self.store.pending_promotions():  # cut short between decision and check
+            if analyser is not None and hasattr(analyser, "analyse"):
+                self._spawn(self._promote_if_eliminated(presence, analyser))
+            else:
+                self.store.update_presence(presence["id"], promotion_pending=False)
 
     async def wait_idle(self) -> None:
         while self._tasks:
@@ -306,6 +317,58 @@ class Service(PadsMixin):
         )
         self.store.insert_label(visit_id, "pee", "manual_add", self._by(data), None)
         await self._visit_decided(visit_id, None)
+
+    async def _open_watch_visit(self, found: Candidate) -> None:
+        """Open a visit for a confirmed change at the pad that Frigate did not report.
+
+        Skipped when a visit or presence already explains it, when something is happening at the
+        tray, or when today's cap is used. Gemini decides like for any visit; with validation mode
+        on it also lands in the review list.
+        """
+        local = found.at.astimezone(LOCAL_TZ)
+        if self._watch_day != local.date():
+            self._watch_day, self._watch_opened = local.date(), 0
+        window = timedelta(seconds=WATCH_EXPLAIN_S)
+        if self.tracker.active is not None or self.store.activity_between(
+            iso(found.before_at - window), iso(found.at + window)
+        ):
+            log.info("watch: a visit or presence already explains the change, no new visit")
+            return
+        if self._watch_opened >= WATCH_DAILY_CAP:
+            log.warning("watch: %s visits already opened today, ignoring a change", WATCH_DAILY_CAP)
+            return
+        if self.analysers.get(self.cfg["deciding_analyser"]) is None:
+            log.warning("watch: no analyser configured, the change is not analysed")
+            return
+        stamp = local
+        visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        while self.store.get_visit(visit_id):
+            stamp += timedelta(seconds=1)
+            visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        directory = self.evidence.visit_dir(visit_id)
+        self.evidence.write(directory / "before.jpg", found.before_jpeg)
+        self.evidence.write(directory / "after.jpg", found.after_jpeg)
+        self.store.insert_visit(
+            {
+                "id": visit_id,
+                "source": "auto",
+                "started_at": iso(found.at),
+                "ended_at": iso(found.at),
+                "entries": 1,
+                "person_present": False,
+                "frigate_event_ids": [],
+                "before_age_s": int((found.at - found.before_at).total_seconds()),
+                "state": "ANALYSING",
+                "poop_observed": "none",
+                "reason": "mudança no tapete sem detecção do Frigate",
+                "needs_review": False,
+            }
+        )
+        self._watch_opened += 1
+        log.info("watch: visit %s opened (pad %.2f, floor %.2f)", visit_id,
+                 found.pad_step, found.ctrl_step)  # fmt: skip
+        self._spawn(self._analyse(visit_id, retry=True))  # the frames are already on disk
+        await self.publish_state()
 
     async def _cmd_reject_last(self, data: dict) -> None:
         """`ellie/cmd/reject_last`: undo the most recent pee counted today."""
@@ -451,6 +514,8 @@ class Service(PadsMixin):
                 return await self._fail(visit_id, "frame_error")
             self.evidence.write(after_path, after)
             self.reference.update(after)  # the next visit starts from this clear frame
+            if self.watch is not None:
+                self.watch.rebase(after)  # what changed at the pad is explained by this visit
         if not before_path.exists():
             return await self._fail(visit_id, "no_reference")
         analyser = self.analysers.get(self.cfg["deciding_analyser"])
@@ -620,14 +685,20 @@ class Service(PadsMixin):
                 self._image_keys[topic] = visit_id
         top = self._top_photo(last)
         top_topic = topics["last_pee_photo"]
-        if top is not None and self._image_keys.get(top_topic) != top[0]:
-            if await self._publish(top_topic, top[1], True) is not False:
-                self._image_keys[top_topic] = top[0]
+        if (
+            top is not None
+            and self._image_keys.get(top_topic) != top[0]
+            and await self._publish(top_topic, top[1], True) is not False
+        ):
+            self._image_keys[top_topic] = top[0]
         pad_path, _ = self.pad_photo()  # the photo of the current pad (see pads_flow.pad_photo)
         pad_topic = topics["pad_photo"]
-        if pad_path is not None and self._image_keys.get(pad_topic) != str(pad_path):
-            if await self._publish(pad_topic, pad_path.read_bytes(), True) is not False:
-                self._image_keys[pad_topic] = str(pad_path)
+        if (
+            pad_path is not None
+            and self._image_keys.get(pad_topic) != str(pad_path)
+            and await self._publish(pad_topic, pad_path.read_bytes(), True) is not False
+        ):
+            self._image_keys[pad_topic] = str(pad_path)
 
     def _top_photo(self, last: dict | None) -> tuple[str, bytes] | None:
         """(key, jpeg) for the big "Foto do tapete": the latest of the last pee and a pad change.

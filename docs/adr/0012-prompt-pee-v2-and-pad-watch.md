@@ -43,3 +43,28 @@ Third variant added during the test: `gemini:pee_v2+medium` (same prompt as `pee
 - `pee_v2+medium` fixes 00:31 but adds one false pee (21:38), probably the stain of the previous visit seen again. Totals: `pee_v2` 13/15 agree, `pee_v2+medium` 14/16 (counting the 00:31 case), `pee_v1` 13/15 (accuracy sensor). The sample is far too small to call a winner.
 - Cost: 46 calls this month cost 0.0527 EUR (about 0.001 EUR per call); `medium` does not show a visible increase in the counters.
 - **Decision:** keep `gemini:pee_v1` as the decider. Keep `pee_v2` and `pee_v2+medium` selectable and compare them on new labelled visits (both run in shadow through `reanalyse`). Revisit after about 30 labelled visits, or sooner if the owner prefers fewer missed pees over an occasional false one.
+
+## Amendment 2026-11-03: the pad watch now opens visits (owner approved after the 14:46 catch)
+
+First real catch: 2026-11-03 14:46, a pee on the new pad with no Frigate event (motion recording of 14:45:46-14:47:03 had 0 objects; `watch.csv` row 14:46:05 `pad 0.422`, `floor 0.071`, baseline about 0.03). It was not confirmed because the next frame failed (go2rtc HTTP 500) and the frame after showed someone at the tray.
+
+Changes (app 3.4.1, written, not yet deployed):
+
+- **Confirmation** compares a later crop with the **candidate frame** (pad region still as in the candidate, no light jump), within 5 minutes, instead of with the previous minute. A lost frame or someone at the tray no longer breaks it.
+- **A confirmed candidate opens a visit** (`source = auto`, reason "mudança no tapete sem detecção do Frigate") with `before.jpg` = the crop before the step and `after.jpg` = the candidate crop, and Gemini decides it like any visit. With validation mode on it also lands in the review list.
+- **Dedupe:** no visit if a visit or presence overlaps the window (3 min around the candidate) or the tray is active; `rebase()` makes the after frame of every visit and presence the new baseline, so counted visits do not trigger the watch.
+- **Cap:** at most 6 watch visits per local day (`WATCH_DAILY_CAP`), worst case about 0.008 EUR per day. The cap resets on restart.
+- **go2rtc frame fetch retries once** after an error or HTTP 500 (the endpoint answers 500 or takes 2-8 s now and then).
+
+Open: the thresholds stay as they were; watch `watch.csv` for false candidates (light, owner cleaning) and tune `STEP_MIN`, `STEP_RATIO`, `LIGHT_JUMP` if needed.
+
+### Calibration of the pad watch with real frames (2026-11-03, tests run)
+
+The first thresholds came from one example (the 14:46 catch, `pad 0.422`, global brightness normalisation). Running the watch on the 19 labelled visits (`before.jpg` -> `after.jpg`) showed that a pee on an already stained pad steps only 0.12-0.21 at the pad (floor 0.03-0.07), so the old limit (0.20) would have missed most pees. Two changes, both checked against the same real frames:
+
+- **Brightness is normalised on the floor around the pad**, not on the whole frame: a big pee or a new pad changed the global mean and made the floor look different (ratio dropped under the limit in a synthetic test).
+- **Thresholds:** `STEP_MIN` 0.10 (was 0.20), `STEP_RATIO` 2.0 (was 2.5), new `CTRL_MAX` 0.10 (more than this at the floor is light), `CONFIRM_MAX` 0.06.
+
+Result on the real data (in-sample, 19 visits plus the 14:46 frames from the Frigate recording): 7 of 9 pee visits and the 14:46 case become candidates; the 2 missed are the 06:48 dawn light change and a borderline 2.0 ratio; 0 of the 10 "no pee" visits do (the 21:36 one is dropped by `CTRL_MAX`). It is a small sample and the thresholds were tuned on it, so keep reading `watch.csv` and the log for false candidates; the daily cap (6) and Gemini's decision bound the cost of a wrong one.
+
+Tests: the whole suite passes (383), `ruff check` and `ruff format` are clean. New: `tests/unit/test_watch.py`, `tests/replay/test_replay_watch.py`, two tests in `tests/unit/test_frames.py`.
