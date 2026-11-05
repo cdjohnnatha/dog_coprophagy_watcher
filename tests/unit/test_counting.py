@@ -98,6 +98,7 @@ def test_uncertain_never_counted_manual_counted(store):
     assert c.summary(now) == {
         "date": "2026-01-10",
         "pees": 1,
+        "poops": 0,
         "visits": 2,
         "corrected": 0,
         "uncertain_open": 1,
@@ -164,3 +165,22 @@ def test_last_pee(store):
 
 def test_tz_default():
     assert str(LOCAL_TZ) == "Europe/Lisbon"
+
+
+def test_poops_are_counted_per_day_and_never_mixed_with_pees(store):
+    store.insert_visit(mk("a", "2026-01-10T10:00:00Z", "pee", final_poop="poop"))
+    store.insert_visit(mk("b", "2026-01-10T11:00:00Z", "no_pee", final_poop="poop"))
+    store.insert_visit(mk("c", "2026-01-10T12:00:00Z", "pee", final_poop="no_poop"))
+    store.insert_visit(mk("d", "2026-01-09T12:00:00Z", "no_pee", final_poop="poop"))
+    store.insert_visit(mk("e", "2026-01-10T13:00:00Z", "uncertain", final_poop="unknown"))
+    c = Counting(store)
+    now = utc(2026, 1, 10, 20)
+    assert c.poops_today(now) == 2 and c.pees_today(now) == 2
+    days = c.poop_history_days(now, days=3)
+    assert days == [
+        {"date": "2026-01-08", "poops": 0},
+        {"date": "2026-01-09", "poops": 1},
+        {"date": "2026-01-10", "poops": 2},
+    ]
+    assert c.last_poop(now)["id"] == "b"
+    assert c.summary(now)["poops"] == 2

@@ -18,7 +18,7 @@ from typing import Any
 from ellie import discovery
 from ellie.analysers.base import Analyser, AnalyserError
 from ellie.counting import LOCAL_TZ, Counting, local_date
-from ellie.decide import decide_visit
+from ellie.decide import decide_poop, decide_visit
 from ellie.evidence import Evidence
 from ellie.frames import FrameError, ReferenceKeeper
 from ellie.pads import PresenceTracker
@@ -41,6 +41,10 @@ REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference fr
 WATCH_DAILY_CAP = 6  # visits the pad watch may open per local day (worst case about 0.008 EUR)
 WATCH_EXPLAIN_S = 180  # a visit or presence this close to a candidate already explains it
 ALERT_EVERY_S = 6 * 3600
+POOP_PRESENT_TIMEOUT_H = 12  # a counted poop nobody cleared stops being "present" after this
+POOP_TRACK_LOOKBACK_DAYS = 2  # after a restart, open poops this recent are followed again
+POOP_LABELS = ("poop", "no_poop")
+PEE_LABELS = ("pee", "no_pee")
 
 # Owner-facing reasons (Brazilian Portuguese) for visits that could not be decided.
 REASONS = {
@@ -136,12 +140,14 @@ class Service(PadsMixin):
             "pad_label": self._cmd_pad_label,
             "pad_changed": self._cmd_pad_changed,
             "pad_undo": self._cmd_pad_undo,
+            "poop_clear": self._cmd_poop_clear,
         }
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
         self._last_purge: date | None = None
         self._inflight: set[str] = set()  # visit/presence ids with an analysis running
         self._image_keys: dict[str, str] = {}
+        self._poop_asked: set[str] = set()  # visits whose poop question was already sent
 
     # --- MQTT entry points ---
 
@@ -199,8 +205,11 @@ class Service(PadsMixin):
                 self.reference.update(crop)
                 if confirmed is not None:  # a change Frigate never reported (ADR-0012)
                     await self._open_watch_visit(confirmed)
+                for visit_id in self.watch.take_cleared() if self.watch is not None else ():
+                    await self._clear_poops("watch", visit_id=visit_id)  # the blob is gone
             except (FrameError, OSError) as exc:
                 log.warning("reference refresh failed: %s", exc)
+        await self._expire_poops(now)
         Counting(self.store).resolve_overdue_uncertain(now)
         local = now.astimezone(LOCAL_TZ)
         if (local.hour, local.minute) >= (3, 30) and self._last_purge != local.date():
@@ -224,6 +233,7 @@ class Service(PadsMixin):
                 self._spawn(self._analyse_presence(presence["id"], retry=True))
             else:  # we lost track of this person: nothing to judge
                 self.store.update_presence(presence["id"], state="DECIDED", reason="restart")
+        self._follow_open_poops()
         analyser = self.analysers.get(self.cfg["deciding_analyser"])
         for presence in self.store.pending_promotions():  # cut short between decision and check
             if analyser is not None and hasattr(analyser, "analyse"):
@@ -272,12 +282,20 @@ class Service(PadsMixin):
     async def _cmd_label(self, data: dict) -> None:
         """`ellie/cmd/label`: the owner answers for one visit (notification or dashboard)."""
         visit_id, label = data.get("visit_id"), data.get("label")
-        channel = data.get("channel", "dashboard")
+        channel, kind = data.get("channel", "dashboard"), data.get("kind", "pee")
         visit = self.store.get_visit(visit_id) if isinstance(visit_id, str) else None
-        if visit is None or label not in ("pee", "no_pee") or channel not in LABEL_CHANNELS:
-            log.warning("ignored label command %r", {k: data.get(k) for k in ("visit_id", "label")})
+        valid = (
+            {"pee": PEE_LABELS, "poop": POOP_LABELS}.get(kind, ()) if isinstance(kind, str) else ()
+        )
+        if visit is None or label not in valid or channel not in LABEL_CHANNELS:
+            log.warning(
+                "ignored label command %r", {k: data.get(k) for k in ("visit_id", "kind", "label")}
+            )
             return
-        await self._apply_label(visit, label, channel, self._by(data))
+        if kind == "poop":  # a poop answer never touches the pee outcome (ADR-0014)
+            await self._apply_poop_label(visit, label, channel, self._by(data))
+        else:
+            await self._apply_label(visit, label, channel, self._by(data))
 
     async def _cmd_manual_pee(self, data: dict) -> None:
         """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
@@ -328,7 +346,9 @@ class Service(PadsMixin):
         local = found.at.astimezone(LOCAL_TZ)
         if self._watch_day != local.date():
             self._watch_day, self._watch_opened = local.date(), 0
-        window = timedelta(seconds=WATCH_EXPLAIN_S)
+        # a poop often comes a minute or two after a visit closed, so for the floor only a visit
+        # that overlaps the frames themselves explains it (ADR-0012 amendment)
+        window = timedelta(seconds=0 if found.kind == "floor" else WATCH_EXPLAIN_S)
         if self.tracker.active is not None or self.store.activity_between(
             iso(found.before_at - window), iso(found.at + window)
         ):
@@ -360,13 +380,17 @@ class Service(PadsMixin):
                 "before_age_s": int((found.at - found.before_at).total_seconds()),
                 "state": "ANALYSING",
                 "poop_observed": "none",
-                "reason": "mudança no tapete sem detecção do Frigate",
+                "reason": (
+                    "mancha escura fora do tapete sem detecção do Frigate"
+                    if found.kind == "floor"
+                    else "mudança no tapete sem detecção do Frigate"
+                ),
                 "needs_review": False,
             }
         )
         self._watch_opened += 1
-        log.info("watch: visit %s opened (pad %.2f, floor %.2f)", visit_id,
-                 found.pad_step, found.ctrl_step)  # fmt: skip
+        log.info("watch: %s visit %s opened (pad %.2f, floor %.2f, peak %.2f)", found.kind,
+                 visit_id, found.pad_step, found.ctrl_step, found.floor_peak)  # fmt: skip
         self._spawn(self._analyse(visit_id, retry=True))  # the frames are already on disk
         await self.publish_state()
 
@@ -417,6 +441,105 @@ class Service(PadsMixin):
         await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
         await self._visit_decided(visit_id, None)
 
+    # --- poop (ADR-0014) ---
+
+    @staticmethod
+    def _poop_where(visit: dict) -> str | None:
+        return (
+            visit["poop_observed"] if visit["poop_observed"] in ("on_pad", "beside_tray") else None
+        )
+
+    def _poop_fields(self, result) -> dict:
+        """auto_poop and final_poop from an analyser answer (None final = the owner is asked)."""
+        outcome = decide_poop(result, self.cfg["confidence_threshold"])
+        final = outcome if outcome in ("poop", "no_poop") else None
+        return {"auto_poop": outcome, "final_poop": "unknown" if outcome == "unknown" else final}
+
+    def _follow_poop(self, visit: dict) -> None:
+        """Hand a counted, uncleared poop to the pad watch so it can see when it is gone."""
+        if self.watch is None:
+            return
+        directory = self.evidence.visit_dir(visit["id"])
+        before, after = directory / "before.jpg", directory / "after.jpg"
+        if before.exists() and after.exists():
+            self.watch.track_poop(visit["id"], before.read_bytes(), after.read_bytes())
+
+    def _follow_open_poops(self) -> None:
+        cutoff = iso(self._clock() - timedelta(days=POOP_TRACK_LOOKBACK_DAYS))
+        for visit in self.store.open_poops():
+            if visit["started_at"] >= cutoff:
+                self._follow_poop(visit)
+
+    async def _clear_poops(
+        self, by: str, visit_id: str | None = None, where: str | None = None
+    ) -> int:
+        """Mark open poops as cleared (`by`: watch, pad_change, owner or timeout)."""
+        stamp, cleared = iso(self._clock()), 0
+        for visit in self.store.open_poops():
+            if (visit_id and visit["id"] != visit_id) or (
+                where and self._poop_where(visit) != where
+            ):
+                continue
+            self.store.update_visit(visit["id"], poop_cleared_at=stamp, poop_cleared_by=by)
+            if self.watch is not None:
+                self.watch.untrack_poop(visit["id"])
+            cleared += 1
+        if cleared:
+            log.info("poop cleared (%s): %s visit(s)", by, cleared)
+            await self.publish_state()
+        return cleared
+
+    async def _expire_poops(self, now: datetime) -> None:
+        limit = timedelta(hours=POOP_PRESENT_TIMEOUT_H)
+        for visit in self.store.open_poops():
+            seen = datetime.fromisoformat(visit["ended_at"] or visit["started_at"])
+            if now - seen >= limit:
+                await self._clear_poops("timeout", visit_id=visit["id"])
+
+    async def _cmd_poop_clear(self, data: dict) -> None:
+        """`ellie/cmd/poop_clear`: "Limpei". One visit, or every open poop without `visit_id`."""
+        visit_id = data.get("visit_id")
+        if visit_id is not None and not isinstance(visit_id, str):
+            log.warning("ignored poop_clear command: bad visit_id")
+            return
+        await self._clear_poops("owner", visit_id=visit_id or None)
+
+    async def _apply_poop_label(
+        self, visit: dict, label: str, channel: str, by: str | None
+    ) -> None:
+        visit_id = visit["id"]
+        if visit["state"] not in ("DECIDED", "LABELLED"):
+            log.warning(
+                "poop label for %s ignored: the visit is still %s", visit_id, visit["state"]
+            )
+            return
+        self.store.insert_label(visit_id, label, channel, by, visit["final_poop"], kind="poop")
+        fields: dict[str, Any] = {"final_poop": label}
+        if label == "no_poop" and visit["poop_cleared_at"] is None:
+            fields |= {"poop_cleared_at": iso(self._clock()), "poop_cleared_by": "owner"}
+        elif label == "poop" and visit["final_poop"] != "poop":  # a new poop, present until cleared
+            fields |= {"poop_cleared_at": None, "poop_cleared_by": None}
+        self.store.update_visit(visit_id, **fields)
+        visit = self.store.get_visit(visit_id)
+        if self.watch is not None:
+            self.watch.untrack_poop(visit_id)
+        if label == "poop" and visit["poop_cleared_at"] is None:
+            self._follow_poop(visit)
+        payload = json.dumps({"visit_id": visit_id, "kind": "poop"})
+        await self._publish("ellie/review/resolved", payload, False)
+        await self._visit_decided(visit_id, None)
+
+    async def _ask_poop(self, visit: dict) -> None:
+        """Ask the owner about a poop Gemini was unsure of (once per visit)."""
+        if (
+            visit["auto_poop"] != "uncertain"
+            or visit["final_poop"] is not None
+            or visit["id"] in self._poop_asked
+        ):
+            return
+        self._poop_asked.add(visit["id"])
+        await self._request_review(visit, "poop")
+
     async def _rerun(self, visit_id: str, analyser_id: object = None) -> None:
         if visit_id in self._inflight:
             return
@@ -446,8 +569,9 @@ class Service(PadsMixin):
             return
         outcome = decide_visit(result, self.cfg["confidence_threshold"])
         log.info(
-            "reanalyse %s with %s: %s (pee %s %.2f) %s",
-            visit_id, analyser.id, outcome, result.pee, result.pee_confidence, result.reason,
+            "reanalyse %s with %s: %s (pee %s %.2f, poop %s %.2f) %s",
+            visit_id, analyser.id, outcome, result.pee, result.pee_confidence,
+            result.poop, result.poop_confidence, result.reason,
         )  # fmt: skip
         self.store.insert_analysis(
             visit_id, analyser.id, "shadow", result.model_dump(exclude_none=True), outcome,
@@ -553,6 +677,8 @@ class Service(PadsMixin):
             "reason": result.reason,
             "deciding_analyser": analyser.id,
         }
+        if not self.store.labels_for(visit_id, "poop"):  # the owner's poop answer wins too
+            fields |= self._poop_fields(result) | {"poop_cleared_at": None, "poop_cleared_by": None}
         if not self.store.labels_for(visit_id):  # an owner's answer always wins
             fields |= {
                 "state": "DECIDED",
@@ -561,6 +687,8 @@ class Service(PadsMixin):
             }
         self.store.update_visit(visit_id, **fields)
         visit = self.store.get_visit(visit_id)
+        if visit["final_poop"] == "poop" and visit["poop_cleared_at"] is None:
+            self._follow_poop(visit)
         if (
             result.pad_replaced and visit["person_present"]
         ):  # a person was there: the pad was swapped
@@ -596,6 +724,9 @@ class Service(PadsMixin):
         ):
             log.warning("visit %s was already decided, not turning it into unknown", visit_id)
             return
+        poop = {} if self.store.labels_for(visit_id, "poop") else {
+            "auto_poop": "unknown", "final_poop": "unknown",
+        }  # fmt: skip
         self.store.update_visit(
             visit_id,
             state="DECIDED",
@@ -603,6 +734,7 @@ class Service(PadsMixin):
             final_outcome="unknown",
             needs_review=True,
             reason=REASONS.get(code, REASONS["analysis_failed"]),
+            **poop,
         )
         for fix_code, title, message in FIXABLE.values():
             if fix_code == code:
@@ -620,12 +752,15 @@ class Service(PadsMixin):
         await self._publish(f"ellie/visit/{visit_id}", json.dumps(visit, ensure_ascii=False), False)
         if review_kind:
             await self._request_review(visit, review_kind)
+        await self._ask_poop(visit)
         await self.publish_state()
 
     async def _request_review(self, visit: dict, kind: str) -> None:
         hhmm = (local_text(visit["started_at"]) or "")[11:16]
         after = self.evidence.visit_dir(visit["id"]) / "after.jpg"
-        if kind == "uncertain":
+        if kind == "poop":
+            title, message = "Ellie: fez cocô?", f"Visita às {hhmm} — {visit['reason']}"
+        elif kind == "uncertain":
             title, message = "Ellie: fez xixi?", f"Visita às {hhmm} — {visit['reason']}"
         else:
             title = "Ellie: não consegui analisar"
@@ -691,6 +826,18 @@ class Service(PadsMixin):
             and await self._publish(top_topic, top[1], True) is not False
         ):
             self._image_keys[top_topic] = top[0]
+        poop_id = (state["poop_present"] or {}).get("visit_id") or (state["last_poop"] or {}).get(
+            "visit_id"
+        )
+        poop_path = self.evidence.visit_dir(poop_id) / "after.jpg" if poop_id else None
+        poop_topic = topics["poop_photo"]
+        if (
+            poop_path is not None
+            and poop_path.exists()
+            and self._image_keys.get(poop_topic) != poop_id
+            and await self._publish(poop_topic, poop_path.read_bytes(), True) is not False
+        ):
+            self._image_keys[poop_topic] = poop_id
         pad_path, _ = self.pad_photo()  # the photo of the current pad (see pads_flow.pad_photo)
         pad_topic = topics["pad_photo"]
         if (

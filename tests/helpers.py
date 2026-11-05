@@ -154,6 +154,10 @@ def make_visit(**overrides: Any) -> dict:
         "needs_review": False,
         "deciding_analyser": "fake:pee_v1",
         "on_pad_s": 2.5,
+        "auto_poop": None,
+        "final_poop": None,
+        "poop_cleared_at": None,
+        "poop_cleared_by": None,
     }
     return {**base, **overrides}
 

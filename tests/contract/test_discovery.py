@@ -30,6 +30,11 @@ IDS = {
     "image.ellie_review_before",
     "image.ellie_review_after",
     "image.ellie_pad_photo",
+    "sensor.ellie_poop_today",
+    "sensor.ellie_last_poop",
+    "sensor.ellie_poop_daily_history",
+    "binary_sensor.ellie_poop_present",
+    "image.ellie_poop_photo",
 }
 ABBREV = {
     "dev",
@@ -49,6 +54,25 @@ ABBREV = {
 
 FULL = {
     "pee_today": 3,
+    "poop_today": 2,
+    "poops_by_day": [{"date": "2026-10-28", "poops": 1}],
+    "last_poop": {
+        "at": "2026-10-29T06:13:00Z",
+        "visit_id": "v1",
+        "where": "beside_tray",
+        "image": "p.jpg",
+        "reason": "r",
+        "cleared_at": None,
+        "cleared_by": None,
+    },
+    "poop_present": {
+        "on": True,
+        "count": 1,
+        "since": "2026-10-29T06:13:00Z",
+        "visit_id": "v1",
+        "where": "beside_tray",
+        "image": "p.jpg",
+    },
     "visits_today": 5,
     "uncertain_open": 1,
     "at_tray": True,
@@ -61,6 +85,8 @@ FULL = {
         "ended_at": "2026-10-29T08:00:00Z",
         "reason": "r",
         "poop_observed": False,
+        "auto_poop": "no_poop",
+        "final_poop": "no_poop",
         "needs_review": False,
         "deciding_analyser": "gemini",
     },
@@ -111,7 +137,21 @@ FULL = {
         "history": [],
     },
 }
-NULLED = {**FULL, "last_pee": None, "last_visit": None, "pad": None}
+NULLED = {
+    **FULL,
+    "last_pee": None,
+    "last_poop": None,
+    "poop_present": {
+        "on": False,
+        "count": 0,
+        "since": None,
+        "visit_id": None,
+        "where": None,
+        "image": None,
+    },
+    "last_visit": None,
+    "pad": None,
+}
 
 MSGS = discovery_messages("1.2.3", ANALYSERS)
 BY_ID = {p["default_entity_id"]: p for _, p in MSGS}
@@ -188,3 +228,26 @@ def test_rendered_values() -> None:
         _render(BY_ID["sensor.ellie_review_queue"]["json_attributes_template"], FULL)
     )
     assert attrs["items"][0]["visit_id"] == "v2"
+
+
+def test_poop_entities_render() -> None:
+    def val(eid: str, state: dict = FULL) -> str:
+        return _render(BY_ID[eid]["value_template"], state)
+
+    assert val("sensor.ellie_poop_today") == "2"
+    assert val("sensor.ellie_poop_daily_history") == "1"
+    assert val("binary_sensor.ellie_poop_present") == "ON"
+    assert val("binary_sensor.ellie_poop_present", NULLED) == "OFF"
+    assert val("sensor.ellie_last_poop") == "2026-10-29T06:13:00Z"
+    assert val("sensor.ellie_last_poop", NULLED) == "None"
+    present = json.loads(
+        _render(BY_ID["binary_sensor.ellie_poop_present"]["json_attributes_template"], FULL)
+    )
+    assert present == {
+        "count": 1,
+        "since": "2026-10-29T06:13:00Z",
+        "visit_id": "v1",
+        "where": "beside_tray",
+        "image": "p.jpg",
+    }
+    assert BY_ID["binary_sensor.ellie_poop_present"]["payload_on"] == "ON"

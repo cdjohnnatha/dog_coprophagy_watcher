@@ -94,3 +94,29 @@ async def test_the_daily_cap_stops_a_runaway(rig, monkeypatch):
     await minute(rig, frame())  # the pad is clean again: a change
     await minute(rig, frame())  # confirmed, but today's cap is used
     assert len(auto_visits(rig)) == 1
+
+
+def floor_poop(jpeg: bytes) -> bytes:
+    img = Image.open(io.BytesIO(jpeg))
+    px = img.load()
+    for y in range(150, 155):
+        for x in range(20, 25):
+            px[x, y] = 20
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+async def test_a_poop_on_the_floor_right_after_a_visit_opens_a_floor_visit(rig):
+    """2026-11-04 19:48: the poop came two minutes after the visit closed (ADR-0012 amendment)."""
+    clean = frame()
+    await minute(rig, clean)
+    await rig.service.on_command("manual_pee", json.dumps({"at": rig.clock().isoformat()}).encode())
+    await minute(rig, clean)  # a visit/pee was just recorded: it must not hide a floor poop
+    await minute(rig, floor_poop(clean))  # candidate
+    await minute(rig, floor_poop(clean))  # confirmed
+    (visit,) = auto_visits(rig)
+    directory = rig.evidence.visit_dir(visit["id"])  # the reason is replaced by Gemini's text
+    assert (directory / "before.jpg").read_bytes() == clean
+    assert (directory / "after.jpg").read_bytes() == floor_poop(clean)
+    assert len(rig.analyser.calls) == 1

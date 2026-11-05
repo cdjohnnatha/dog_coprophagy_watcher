@@ -43,6 +43,31 @@ def pees_on(visits: Iterable[dict], day: date, tz: tzinfo = LOCAL_TZ) -> int:
     )
 
 
+def poops_on(visits: Iterable[dict], day: date, tz: tzinfo = LOCAL_TZ) -> int:
+    """Visits with final_poop 'poop' that started on the given local day."""
+    return sum(
+        1
+        for v in visits
+        if v.get("final_poop") == "poop" and local_date(v["started_at"], tz) == day
+    )
+
+
+def poop_history(
+    visits: Iterable[dict], today: date, days: int = 90, tz: tzinfo = LOCAL_TZ
+) -> list[dict]:
+    """Per-day {date, poops} for the last `days` days, oldest first."""
+    by_day: dict[date, list[dict]] = {}
+    for v in visits:
+        by_day.setdefault(local_date(v["started_at"], tz), []).append(v)
+    return [
+        {
+            "date": (d := today - timedelta(days=o)).isoformat(),
+            "poops": poops_on(by_day.get(d, []), d, tz),
+        }
+        for o in range(days - 1, -1, -1)
+    ]
+
+
 def daily_summary(
     visits: Iterable[dict],
     day: date,
@@ -54,6 +79,7 @@ def daily_summary(
     return {
         "date": day.isoformat(),
         "pees": sum(1 for v in todays if v.get("final_outcome") == "pee"),
+        "poops": sum(1 for v in todays if v.get("final_poop") == "poop"),
         "visits": len(todays),
         "corrected": sum(1 for v in todays if v["id"] in corrected_ids),
         "uncertain_open": sum(
@@ -122,6 +148,20 @@ class Counting:
         visits = self._visits_since(today - timedelta(days=days - 1), today)
         return history(visits, today, days, self._tz, corrected_ids)
 
+    def poops_today(self, now: datetime) -> int:
+        return poops_on(self._visits_on(self._today(now)), self._today(now), self._tz)
+
+    def poop_history_days(self, now: datetime, days: int = 90) -> list[dict]:
+        today = self._today(now)
+        visits = self._visits_since(today - timedelta(days=days - 1), today)
+        return poop_history(visits, today, days, self._tz)
+
+    def last_poop(self, now: datetime, lookback_days: int = 30) -> dict | None:
+        today = self._today(now)
+        visits = self._visits_since(today - timedelta(days=lookback_days), today)
+        poops = [v for v in visits if v.get("final_poop") == "poop"]
+        return max(poops, key=lambda v: v["started_at"], default=None)
+
     def last_pee(self, now: datetime, lookback_days: int = 30) -> dict | None:
         today = self._today(now)
         visits = self._visits_since(today - timedelta(days=lookback_days), today)
@@ -144,4 +184,10 @@ class Counting:
             ):
                 self._store.update_visit(v["id"], final_outcome="unknown", needs_review=True)
                 resolved.append(v["id"])
+            if (
+                v.get("auto_poop") == "uncertain"
+                and v.get("final_poop") is None
+                and age_h >= OVERDUE_AFTER_H
+            ):
+                self._store.update_visit(v["id"], final_poop="unknown")  # nobody answered
         return resolved

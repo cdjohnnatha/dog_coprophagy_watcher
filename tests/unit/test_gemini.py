@@ -211,3 +211,12 @@ def test_each_prompt_version_is_its_own_analyser_and_loads() -> None:
     v2 = GeminiAnalyser("k", "m", pee_prompt="pee_v2", client=object())
     assert (v1.id, v2.id) == ("gemini:pee_v1", "gemini:pee_v2")
     assert "SAME spot" in v2._pee_prompt and "SAME spot" not in v1._pee_prompt
+
+
+def test_pee_v3_only_changes_the_poop_rule() -> None:
+    v1 = GeminiAnalyser("k", "m", client=object())
+    v3 = GeminiAnalyser("k", "m", pee_prompt="pee_v3", client=object())
+    assert v3.id == "gemini:pee_v3"
+    assert "WHOLE image" in v3._pee_prompt and "WHOLE image" not in v1._pee_prompt
+    keep = lambda t: [ln for ln in t.splitlines() if not ln.startswith("6. Poop")]
+    assert keep(v1._pee_prompt) == keep(v3._pee_prompt)

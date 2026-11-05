@@ -50,7 +50,12 @@ async def main() -> None:
         analysers = {}
         if options.gemini_api_key:
             # v1 stays the decider; the others are compared with it via `reanalyse` (ADR-0012)
-            variants = (("pee_v1", "minimal"), ("pee_v2", "minimal"), ("pee_v2", "medium"))
+            variants = (
+                ("pee_v1", "minimal"),
+                ("pee_v2", "minimal"),
+                ("pee_v2", "medium"),
+                ("pee_v3", "minimal"),
+            )
             for prompt, thinking in variants:
                 gemini = GeminiAnalyser(
                     options.gemini_api_key,

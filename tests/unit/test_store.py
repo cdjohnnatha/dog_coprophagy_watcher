@@ -26,7 +26,7 @@ def visit(vid="v_20260101_100000", **over):
 
 
 def test_migration_creates_tables(store):
-    assert store.schema_version() == len(MIGRATIONS) == 5
+    assert store.schema_version() == len(MIGRATIONS) == 6
     names = {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"visits", "analyses", "settings"} <= names
 
@@ -35,7 +35,7 @@ def test_migration_twice_is_noop(tmp_path):
     path = str(tmp_path / "x.db")
     Store(path).close()
     s = Store(path)
-    assert s.schema_version() == 5
+    assert s.schema_version() == 6
     s.close()
 
 
@@ -137,3 +137,52 @@ def test_reopen_keeps_data(tmp_path):
     assert s.get_visit("v_20260101_100000") is not None
     assert s.get_setting("k") == 1
     s.close()
+
+
+def test_migration_6_backfills_old_visits_and_keeps_old_labels(tmp_path) -> None:
+    """A database at version 5 gets final_poop from poop_observed; old poops are not "present"."""
+    import sqlite3
+
+    from ellie.store import MIGRATIONS
+
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    for script in MIGRATIONS[:5]:
+        db.executescript(script)
+    db.execute("PRAGMA user_version = 5")
+
+    def add(visit_id, poop, state="DECIDED", source="auto", outcome="no_pee"):
+        db.execute(
+            "INSERT INTO visits (id, source, started_at, ended_at, state, auto_outcome,"
+            " final_outcome, poop_observed) VALUES (?, ?, '2026-11-01T09:00:00Z',"
+            " '2026-11-01T09:01:00Z', ?, ?, ?, ?)",
+            (visit_id, source, state, outcome, outcome, poop),
+        )
+
+    add("a", "beside_tray")
+    add("b", "none")
+    add("c", "unsure")
+    add("d", "beside_tray", source="manual", state="LABELLED")
+    add("e", "beside_tray", state="OPEN", outcome=None)
+    db.execute("INSERT INTO labels (visit_id, label, channel) VALUES ('a', 'pee', 'dashboard')")
+    db.commit()
+    db.close()
+
+    store = Store(path)
+    assert store.schema_version() == 6
+    got = {v["id"]: v for v in store.visits_started_between("2026", "2027")}
+    assert (got["a"]["auto_poop"], got["a"]["final_poop"]) == ("poop", "poop")
+    assert got["a"]["poop_cleared_by"] == "migration" and store.open_poops() == []
+    assert (got["b"]["auto_poop"], got["b"]["final_poop"]) == ("no_poop", "no_poop")
+    assert (got["c"]["auto_poop"], got["c"]["final_poop"]) == ("uncertain", "unknown")
+    assert store.poop_review_open() == []  # an old doubt is not asked retroactively
+    assert got["d"]["final_poop"] is None and got["e"]["final_poop"] is None
+    assert store.poops_between("2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z") == 1
+    (label,) = store.labels_for("a")
+    assert label["kind"] == "pee" and label["label"] == "pee"
+    store.insert_label("a", "poop", "dashboard", None, "poop", kind="poop")
+    assert [x["label"] for x in store.labels_for("a", "poop")] == ["poop"]
+    assert [x["label"] for x in store.labels_for("a")] == ["pee"]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_label("a", "poop", "dashboard", None, None, kind="pee-ish")
+    store.close()

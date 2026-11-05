@@ -32,6 +32,22 @@ def _url_if_exists(evidence: Evidence, visit_id: str, name: str) -> str | None:
     return evidence.local_url(path) if path.exists() else None
 
 
+def _poop_view(evidence: Evidence, visit: dict | None) -> dict | None:
+    if visit is None:
+        return None
+    return {
+        "at": visit["started_at"],
+        "visit_id": visit["id"],
+        "where": visit["poop_observed"]
+        if visit["poop_observed"] in ("on_pad", "beside_tray")
+        else None,
+        "image": _url_if_exists(evidence, visit["id"], "after.jpg"),
+        "reason": visit["reason"],
+        "cleared_at": visit["poop_cleared_at"],
+        "cleared_by": visit["poop_cleared_by"],
+    }
+
+
 def build_state(
     *,
     store: Store,
@@ -58,9 +74,12 @@ def build_state(
         window_days,
     )
     corrected = store.corrected_ids(iso(now - timedelta(days=90)))
+    open_poops = store.open_poops()
+    last_poop = counting.last_poop(now)
 
     return {
         "pee_today": summary["pees"],
+        "poop_today": summary["poops"],
         "visits_today": summary["visits"],
         "uncertain_open": summary["uncertain_open"],
         "at_tray": bool(active_visit and active_visit["state"] in ("OPEN", "CLOSING")),
@@ -72,6 +91,16 @@ def build_state(
             "image": _url_if_exists(evidence, last_pee["id"], "after.jpg"),
             "reason": last_pee["reason"],
         },
+        "last_poop": _poop_view(evidence, last_poop),
+        "poop_present": {
+            "on": bool(open_poops),
+            "count": len(open_poops),
+            "since": open_poops[0]["started_at"] if open_poops else None,
+            **{
+                k: (_poop_view(evidence, open_poops[0]) or {}).get(k) if open_poops else None
+                for k in ("visit_id", "where", "image")
+            },
+        },
         "last_visit": None
         if last_visit is None
         else {
@@ -82,6 +111,8 @@ def build_state(
             "ended_at": last_visit["ended_at"],
             "reason": last_visit["reason"],
             "poop_observed": last_visit["poop_observed"],
+            "auto_poop": last_visit["auto_poop"],
+            "final_poop": last_visit["final_poop"],
             "needs_review": last_visit["needs_review"],
             "deciding_analyser": last_visit["deciding_analyser"],
         },
@@ -93,6 +124,10 @@ def build_state(
                     "time": local_text(v["started_at"]),
                     "auto_outcome": v["auto_outcome"],
                     "reason": v["reason"],
+                    "final_outcome": v["final_outcome"],
+                    "pee_question": bool(v["needs_review"]),
+                    "poop_question": v["auto_poop"] == "uncertain" and v["final_poop"] is None,
+                    "poop_observed": v["poop_observed"],
                     "before": _url_if_exists(evidence, v["id"], "before.jpg"),
                     "after": _url_if_exists(evidence, v["id"], "after.jpg"),
                 }
@@ -100,6 +135,7 @@ def build_state(
             ],
         },
         "daily_history": {"days": counting.history_days(now, days=90, corrected_ids=corrected)},
+        "poops_by_day": counting.poop_history_days(now, days=90),
         "accuracy": accuracy,
         "analysis_calls": {
             "calls": month["calls"],

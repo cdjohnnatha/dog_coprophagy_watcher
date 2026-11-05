@@ -3,7 +3,12 @@
 import pytest
 
 from ellie.analysers.base import AnalysisResult, PadChangeResult
-from ellie.decide import decide_pad_change, decide_visit, needs_phone_notification
+from ellie.decide import (
+    decide_pad_change,
+    decide_poop,
+    decide_visit,
+    needs_phone_notification,
+)
 
 T = 0.80
 
@@ -97,3 +102,48 @@ def test_decide_pad_change(result: PadChangeResult | None, threshold: float, exp
 )
 def test_needs_phone_notification(outcome: str, expected: bool) -> None:
     assert needs_phone_notification(outcome) is expected
+
+
+def poop_result(poop="none", conf=0.9, quality="ok", pad_replaced=False) -> AnalysisResult:
+    return AnalysisResult(
+        pee=False,
+        pee_confidence=0.95,
+        poop=poop,  # type: ignore[arg-type]
+        poop_confidence=conf,
+        pad_replaced=pad_replaced,
+        image_quality=quality,  # type: ignore[arg-type]
+        reason="test",
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (poop_result("on_pad"), "poop"),
+        (poop_result("beside_tray"), "poop"),
+        (poop_result("none"), "no_poop"),
+        (poop_result("unsure"), "uncertain"),
+        (poop_result("beside_tray", conf=0.79), "uncertain"),
+        (poop_result("none", conf=0.8), "no_poop"),  # the boundary is inclusive
+        (poop_result("none", conf=0.5), "uncertain"),
+        (poop_result("beside_tray", quality="occluded"), "uncertain"),
+        (poop_result("on_pad", pad_replaced=True), "uncertain"),
+        (poop_result("beside_tray", pad_replaced=True), "poop"),  # the floor is not the pad
+        (None, "unknown"),
+    ],
+)
+def test_decide_poop(result, expected) -> None:
+    assert decide_poop(result, T) == expected
+
+
+def test_the_pee_and_the_poop_decisions_are_independent() -> None:
+    result = AnalysisResult(
+        pee=True,
+        pee_confidence=0.5,
+        poop="beside_tray",
+        poop_confidence=0.95,
+        pad_replaced=False,
+        image_quality="ok",
+        reason="test",
+    )
+    assert decide_visit(result, T) == "uncertain" and decide_poop(result, T) == "poop"

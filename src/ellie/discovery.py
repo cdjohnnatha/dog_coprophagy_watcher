@@ -4,9 +4,16 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
 
     pee_today: int, visits_today: int, uncertain_open: int, at_tray: bool,
     last_pee: null | {at: ISO-8601 UTC, visit_id, image, reason},
+    poop_today: int, poops_by_day: [{date, poops}] (90 days, oldest first),
+    last_poop: null | {at, visit_id, where: on_pad|beside_tray|null, image, reason,
+                       cleared_at | null, cleared_by | null},
+    poop_present: {on: bool, count: int, since: ISO-8601 UTC | null, visit_id | null,
+                   where | null, image | null},
     last_visit: null | {visit_id, auto_outcome, final_outcome, started_at, ended_at,
-                        reason, poop_observed, needs_review, deciding_analyser},
-    review_queue: {count: int, items: [{visit_id, time, auto_outcome, reason, before, after}]},
+                        reason, poop_observed, auto_poop, final_poop, needs_review,
+                        deciding_analyser},
+    review_queue: {count: int, items: [{visit_id, time, auto_outcome, final_outcome, reason,
+                  pee_question, poop_question, poop_observed, before, after}]},
     daily_history: {days: [{date, pees, visits, corrected}]},
     accuracy: {pct: float|null, window_days: int,
                analysers: {id: {labelled, agree, accuracy}}},
@@ -19,7 +26,7 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
                  pad_color: str | null, image: str | null, history: [...]}
 
 Commands arrive on ``ellie/set/<setting>``; availability on ``ellie/status``.
-Four image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
+Five image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
 them with its own auth, which a plain /media/local URL in a dashboard card cannot do.
 """
 
@@ -37,6 +44,7 @@ IMAGE_TOPICS = {
     "review_before": "ellie/image/review_before",
     "review_after": "ellie/image/review_after",
     "pad_photo": "ellie/image/pad",
+    "poop_photo": "ellie/image/poop",
 }
 DEVICE: dict[str, Any] = {
     "identifiers": ["ellie_v3"],
@@ -73,6 +81,8 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
         "ended_at",
         "reason",
         "poop_observed",
+        "auto_poop",
+        "final_poop",
         "needs_review",
         "deciding_analyser",
     ]
@@ -120,6 +130,68 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 "json_attributes_topic": STATE_TOPIC,
                 "json_attributes_template": _attrs(
                     **{k: _opt("last_pee", k) for k in ("visit_id", "image", "reason")}
+                ),
+            },
+        ),
+        (
+            "sensor",
+            "poop_today",
+            {
+                "name": "Cocôs hoje",
+                "state_class": "measurement",
+                "unit_of_measurement": "cocôs",
+                "icon": "mdi:emoticon-poop",
+                "value_template": _val("poop_today"),
+            },
+        ),
+        (
+            "sensor",
+            "last_poop",
+            {
+                "name": "Último cocô",
+                "device_class": "timestamp",
+                "value_template": "{{ " + _opt("last_poop", "at") + " }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(
+                    **{
+                        k: _opt("last_poop", k)
+                        for k in (
+                            "visit_id",
+                            "where",
+                            "image",
+                            "reason",
+                            "cleared_at",
+                            "cleared_by",
+                        )
+                    }
+                ),
+            },
+        ),
+        (
+            "sensor",
+            "poop_daily_history",
+            {
+                "name": "Histórico diário de cocô",
+                "value_template": "{{ value_json.poops_by_day | length }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(days="value_json.poops_by_day"),
+            },
+        ),
+        (
+            "binary_sensor",
+            "poop_present",
+            {
+                "name": "Cocô na área",
+                "icon": "mdi:emoticon-poop",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "value_template": "{{ 'ON' if value_json.poop_present.on else 'OFF' }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(
+                    **{
+                        k: f"value_json.poop_present.{k}"
+                        for k in ("count", "since", "visit_id", "where", "image")
+                    }
                 ),
             },
         ),
@@ -301,6 +373,7 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 ("review_before", "Revisão: foto antes"),
                 ("review_after", "Revisão: foto depois"),
                 ("pad_photo", "Foto da troca do tapete"),
+                ("poop_photo", "Foto do cocô"),
             )
         ],
     ]

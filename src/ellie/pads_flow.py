@@ -285,7 +285,11 @@ class PadsMixin:
             reason=result.reason,
             needs_review=(not decided) or bool(self.cfg["validation_mode"]),
             deciding_analyser=analyser.id,
+            **self._poop_fields(result),
         )
+        promoted = self.store.get_visit(visit_id)
+        if promoted["final_poop"] == "poop":
+            self._follow_poop(promoted)
         log.info(
             "presence %s became visit %s: %s (Frigate saw a person)",
             presence["id"],
@@ -357,6 +361,7 @@ class PadsMixin:
             "image": self._change_image({"presence_id": presence_id, "visit_id": visit_id}),
         }
         await self._publish("ellie/pad/changed", json.dumps(message), False)
+        await self._clear_poops("pad_change", where="on_pad")  # the poop went with the pad
         await self.publish_state()
         return change_id
 

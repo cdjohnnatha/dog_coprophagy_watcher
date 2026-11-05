@@ -98,8 +98,49 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE presences ADD COLUMN promotion_pending INTEGER NOT NULL DEFAULT 0;
     """,
+    # 6: the poop outcome next to the pee one (ADR-0014), "poop present" bookkeeping and labels
+    # that carry a kind. SQLite cannot widen a CHECK, so the labels table is rebuilt.
+    """
+    ALTER TABLE visits ADD COLUMN auto_poop TEXT
+        CHECK (auto_poop IN ('poop', 'no_poop', 'uncertain', 'unknown'));
+    ALTER TABLE visits ADD COLUMN final_poop TEXT
+        CHECK (final_poop IN ('poop', 'no_poop', 'unknown'));
+    ALTER TABLE visits ADD COLUMN poop_cleared_at TEXT;
+    ALTER TABLE visits ADD COLUMN poop_cleared_by TEXT
+        CHECK (poop_cleared_by IN ('watch', 'pad_change', 'owner', 'timeout', 'migration'));
+    UPDATE visits SET
+        auto_poop = CASE poop_observed
+            WHEN 'on_pad' THEN 'poop' WHEN 'beside_tray' THEN 'poop'
+            WHEN 'none' THEN 'no_poop' ELSE 'uncertain' END,
+        final_poop = CASE poop_observed
+            WHEN 'on_pad' THEN 'poop' WHEN 'beside_tray' THEN 'poop'
+            WHEN 'none' THEN 'no_poop' ELSE 'unknown' END
+        WHERE source = 'auto' AND state IN ('DECIDED', 'LABELLED')
+            AND auto_outcome IN ('pee', 'no_pee', 'uncertain');
+    UPDATE visits SET poop_cleared_at = COALESCE(ended_at, started_at),
+        poop_cleared_by = 'migration' WHERE final_poop = 'poop';
+    CREATE TABLE labels_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        visit_id TEXT NOT NULL REFERENCES visits(id),
+        label TEXT NOT NULL CHECK (label IN ('pee', 'no_pee', 'poop', 'no_poop')),
+        channel TEXT NOT NULL
+            CHECK (channel IN ('notification', 'dashboard', 'manual_add', 'reject_last')),
+        labelled_by TEXT,
+        at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        previous_final_outcome TEXT
+            CHECK (previous_final_outcome IN ('pee', 'no_pee', 'unknown', 'poop', 'no_poop')),
+        kind TEXT NOT NULL DEFAULT 'pee' CHECK (kind IN ('pee', 'poop'))
+    );
+    INSERT INTO labels_new (id, visit_id, label, channel, labelled_by, at, previous_final_outcome)
+        SELECT id, visit_id, label, channel, labelled_by, at, previous_final_outcome FROM labels;
+    DROP TABLE labels;
+    ALTER TABLE labels_new RENAME TO labels;
+    CREATE INDEX idx_labels_visit ON labels(visit_id);
+    """,
 ]
 
+# a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
+_NEEDS_REVIEW = "(needs_review = 1 OR (auto_poop = 'uncertain' AND final_poop IS NULL))"
 _VISIT_COLUMNS = (
     "id",
     "source",
@@ -117,6 +158,10 @@ _VISIT_COLUMNS = (
     "needs_review",
     "deciding_analyser",
     "on_pad_s",
+    "auto_poop",
+    "final_poop",
+    "poop_cleared_at",
+    "poop_cleared_by",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -181,11 +226,17 @@ class Store:
 
     def _migrate(self) -> None:
         for version in range(self.schema_version(), len(MIGRATIONS)):
-            # executescript commits implicitly; user_version is set last so a
-            # failed migration is retried on the next start.
-            self._db.executescript(MIGRATIONS[version])
-            self._db.execute(f"PRAGMA user_version = {version + 1}")
-        self._db.commit()
+            # One transaction per migration (SQLite DDL is transactional): a crash or an error
+            # half way rolls everything back, so the retry on the next start starts clean
+            # instead of failing on "duplicate column name" for ever.
+            try:
+                self._db.executescript(
+                    f"BEGIN;\n{MIGRATIONS[version]}\nPRAGMA user_version = {version + 1};\nCOMMIT;"
+                )
+            except sqlite3.Error:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
 
     def insert_visit(self, visit: dict) -> None:
         unknown = set(visit) - set(_VISIT_COLUMNS)
@@ -247,13 +298,24 @@ class Store:
 
     def review_queue(self, limit: int = 20) -> list[dict]:
         """Visits flagged for review, newest first."""
-        sql = "SELECT * FROM visits WHERE needs_review = 1 ORDER BY started_at DESC LIMIT ?"
+        sql = f"SELECT * FROM visits WHERE {_NEEDS_REVIEW} ORDER BY started_at DESC LIMIT ?"
         return [_visit_from_row(r) for r in self._db.execute(sql, (limit,))]
 
     def review_count(self) -> int:
-        return int(
-            self._db.execute("SELECT COUNT(*) FROM visits WHERE needs_review = 1").fetchone()[0]
+        sql = f"SELECT COUNT(*) FROM visits WHERE {_NEEDS_REVIEW}"
+        return int(self._db.execute(sql).fetchone()[0])
+
+    def open_poops(self) -> list[dict]:
+        """Counted poops that nobody has cleared yet, newest first."""
+        sql = (
+            "SELECT * FROM visits WHERE final_poop = 'poop' AND poop_cleared_at IS NULL"
+            " ORDER BY started_at DESC"
         )
+        return [_visit_from_row(r) for r in self._db.execute(sql)]
+
+    def poop_review_open(self) -> list[dict]:
+        """Decided visits whose poop answer waits for the owner."""
+        return self._visits("auto_poop = 'uncertain' AND final_poop IS NULL")
 
     def latest_visit(self) -> dict | None:
         row = self._db.execute("SELECT * FROM visits ORDER BY started_at DESC LIMIT 1").fetchone()
@@ -357,6 +419,15 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    def poops_between(self, start_iso: str, end_iso: str | None) -> int:
+        """Counted poops from `start_iso` (included) to `end_iso` (excluded; None = until now)."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM visits WHERE final_poop = 'poop' AND started_at >= ?"
+            " AND (? IS NULL OR started_at < ?)",
+            (start_iso, end_iso, end_iso),
+        ).fetchone()
+        return int(row["n"])
+
     def insert_label(
         self,
         visit_id: str,
@@ -364,24 +435,28 @@ class Store:
         channel: str,
         by: str | None = None,
         previous_final_outcome: str | None = None,
+        kind: str = "pee",
     ) -> int:
         with self._db:
             cur = self._db.execute(
-                "INSERT INTO labels (visit_id, label, channel, labelled_by, previous_final_outcome)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (visit_id, label, channel, by, previous_final_outcome),
+                "INSERT INTO labels (visit_id, label, channel, labelled_by,"
+                " previous_final_outcome, kind) VALUES (?, ?, ?, ?, ?, ?)",
+                (visit_id, label, channel, by, previous_final_outcome, kind),
             )
         return int(cur.lastrowid)
 
-    def labels_for(self, visit_id: str) -> list[dict]:
-        rows = self._db.execute("SELECT * FROM labels WHERE visit_id = ? ORDER BY id", (visit_id,))
+    def labels_for(self, visit_id: str, kind: str = "pee") -> list[dict]:
+        """The owner's answers for one question (pee or poop) of a visit, oldest first."""
+        rows = self._db.execute(
+            "SELECT * FROM labels WHERE visit_id = ? AND kind = ? ORDER BY id", (visit_id, kind)
+        )
         return [dict(r) for r in rows]
 
     def corrected_ids(self, start_iso: str) -> set[str]:
         """Visits since `start_iso` whose latest label differs from the automatic outcome."""
         rows = self._db.execute(
             "SELECT v.id FROM visits v JOIN labels l ON l.visit_id = v.id"
-            " AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
+            " AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id AND kind = 'pee')"
             " WHERE v.started_at >= ? AND (v.auto_outcome IS NULL OR"
             " (v.auto_outcome NOT IN ('uncertain', 'unknown') AND v.auto_outcome != l.label))",
             (start_iso,),
@@ -396,7 +471,7 @@ class Store:
             " a.analyser, a.role, a.outcome"
             " FROM visits v"
             " JOIN labels l ON l.visit_id = v.id"
-            "  AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id)"
+            "  AND l.id = (SELECT MAX(id) FROM labels WHERE visit_id = v.id AND kind = 'pee')"
             " LEFT JOIN analyses a ON a.visit_id = v.id"
             "  AND a.error IS NULL"
             "  AND a.id = (SELECT MAX(id) FROM analyses WHERE visit_id = v.id"

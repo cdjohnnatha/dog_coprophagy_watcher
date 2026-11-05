@@ -19,11 +19,12 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 | `ellie/status` | yes | `online` / `offline` (MQTT last will). Availability topic for all entities |
 | `ellie/state` | yes | JSON state for all sensors (one message, entities pick fields via `value_template`) — see [ha-entities.md](ha-entities.md) |
 | `ellie/visit/<visit_id>` | no | The stored visit row as JSON after each decision (no file paths: those are derived from the id) |
-| `ellie/review/request` | no | `{visit_id, kind: "uncertain"|"unknown"|"pad_uncertain", title, message, image: "/media/local/ellie/…/after.jpg", reason}`. For `pad_uncertain`, `visit_id` holds the presence id (`s_…`). Titles and messages are pt-BR |
-| `ellie/review/resolved` | no | `{visit_id}`. HA clears the notification tag on all devices |
+| `ellie/review/request` | no | `{visit_id, kind: "uncertain"|"unknown"|"pad_uncertain"|"poop", title, message, image: "/media/local/ellie/…/after.jpg", reason}`. For `pad_uncertain`, `visit_id` holds the presence id (`s_…`). `kind: "poop"` (new, 3.5.0) asks "Ellie: fez cocô?" once per visit, only when the poop is uncertain. Titles and messages are pt-BR |
+| `ellie/review/resolved` | no | `{visit_id}` (pee or pad answer) or `{visit_id, kind: "poop"}` (poop answer). HA clears the notification tag on all devices; a poop answer must clear only the poop notification |
 | `ellie/pad/changed` | no | `{pad_change_id, at, source, image}` (`image` = `/media/local/...` URL of the photo that came with the change, or null) after any recorded pad change (or undo, with `undone: true`). HA clears the `ellie_pad_reminder` notification on all devices |
 | `ellie/alert` | no | `{kind: "credit_exhausted"|"gemini_key", title, message}`. Problems only the owner can fix (Gemini credit ran out on HTTP 402, key refused on 401/403). The app sends at most one per kind every 6 h; HA turns it into a phone + persistent notification |
 | `ellie/image/last_pee`, `ellie/image/review_before`, `ellie/image/review_after` | yes | Raw JPEG bytes for the three `image` entities, sent only when the photo changes (last counted pee; before/after of the newest visit in the review queue) |
+| `ellie/image/poop` | yes | Raw JPEG for `image.ellie_poop_photo`: the `after.jpg` of the poop that is present now, else of the last counted poop |
 | `homeassistant/<component>/ellie/<object_id>/config` | yes | MQTT discovery configs |
 
 ## Commands (HA → service)
@@ -32,7 +33,8 @@ All payloads are JSON. Invalid payloads are logged and ignored (never crash).
 
 | Topic | Payload | Effect |
 |---|---|---|
-| `ellie/cmd/label` | `{visit_id, label: "pee"|"no_pee", channel, by?}` | Adds a Label (data-model). Publishes `ellie/review/resolved` |
+| `ellie/cmd/label` | `{visit_id, kind?: "pee"|"poop", label: "pee"|"no_pee"|"poop"|"no_poop", channel, by?}` | Adds a Label (data-model). `kind` defaults to `pee`; `pee`/`no_pee` need kind `pee`, `poop`/`no_poop` need kind `poop` (anything else is ignored). A poop answer never changes the pee outcome and the other way round. `no_poop` also clears a poop that is present. Publishes `ellie/review/resolved` |
+| `ellie/cmd/poop_clear` | `{visit_id?, by?}` | "Limpei": clears the poop of that visit, or every poop that is present when `visit_id` is missing (`poop_cleared_by = owner`). It stays counted |
 | `ellie/cmd/manual_pee` | `{at: ISO-8601 local, by?}` | Creates a `source=manual` visit with `final_outcome=pee` |
 | `ellie/cmd/reject_last` | `{by?}` | Labels the most recent counted pee (today) as `no_pee` |
 | `ellie/cmd/reanalyse` | `{visit_id, analyser?}` | Re-runs an analyser (default: the deciding one; or e.g. `gemini:pee_v2`) on stored frames and keeps the answer as a shadow analysis. Logged as `reanalyse <id> with <analyser>: <outcome>` |
@@ -42,6 +44,8 @@ All payloads are JSON. Invalid payloads are logged and ignored (never crash).
 | `ellie/set/<setting>` | value | `confidence_threshold` (0.5–0.99), `merge_gap_s` (15–300), `deciding_analyser` (id), `validation_mode` (`ON`/`OFF`), `pad_change_days` (1–7) |
 
 ## Notification action ids (HA side)
+
+`ELLIE_POOP_YES::<visit_id>` / `ELLIE_POOP_NO::<visit_id>` ("Teve cocô" / "Não teve") → `ellie/cmd/label` with `kind: "poop"`, `label: "poop"` / `"no_poop"`, `channel: "notification"`. Only for `kind: "poop"` review requests.
 
 `ELLIE_PEE_YES::<visit_id>` and `ELLIE_PEE_NO::<visit_id>`. The HA automation maps them to `ellie/cmd/label` with `channel: "notification"`. Button titles: "Fez xixi" / "Não fez".
 

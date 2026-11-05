@@ -24,3 +24,4 @@ These drafts belong to spec [003-ellie-pee-counter](../spec.md). The first imple
 | [0011](0011-activity-at-the-tray-triggers-analysis.md) | Any activity at the tray is analysed, not only a "dog in pad_zone" | accepted (2026-10-30) |
 | [0012](0012-prompt-pee-v2-and-pad-watch.md) | Prompt pee_v2 (+ thinking variant) and a log-only pad watch for pees Frigate never saw | proposed (2026-11-02) |
 | [0013](0013-big-photo-shows-the-clean-pad-after-a-change.md) | The big dashboard photo shows the clean pad after a pad change | accepted (2026-11-02) |
+| [0014](0014-poop-outcome-and-poop-present.md) | The poop outcome, its confirmation and a "poop present" state that clears itself | accepted (2026-11-05) |

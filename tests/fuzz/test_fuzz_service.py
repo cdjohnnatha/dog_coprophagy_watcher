@@ -103,6 +103,7 @@ async def random_command(rig, rnd, clock):
             "manual_pee",
             "reject_last",
             "reanalyse",
+            "poop_clear",
             "pad_label",
             "pad_changed",
             "pad_undo",
@@ -112,9 +113,11 @@ async def random_command(rig, rnd, clock):
     data = {
         "label": {
             "visit_id": pick(visit_ids),
-            "label": rnd.choice(["pee", "no_pee", "maybe", None, 3]),
+            "label": rnd.choice(["pee", "no_pee", "poop", "no_poop", "maybe", None, 3]),
             "channel": rnd.choice(["dashboard", "notification", "manual_add", None]),
+            "kind": rnd.choice(["pee", "poop", "poop", "x", None, 3]),
         },
+        "poop_clear": rnd.choice([{}, {"visit_id": pick(visit_ids)}, {"visit_id": 5}]),
         "manual_pee": {
             "at": rnd.choice(
                 [
@@ -313,6 +316,21 @@ async def _check(rig, errors, seed):
             problems.append(f"{tag}: unknown outcome with a final outcome and no label")
         if v["ended_at"] and v["ended_at"] < v["started_at"]:
             problems.append(f"{tag}: ended before it started")
+        poop_labels = store.labels_for(v["id"], "poop")
+        if poop_labels and v["final_poop"] != poop_labels[-1]["label"]:
+            problems.append(f"{tag}: final_poop differs from the latest poop label")
+        if (
+            not poop_labels
+            and v["auto_poop"] in ("poop", "no_poop")
+            and v["final_poop"] != v["auto_poop"]
+        ):
+            problems.append(f"{tag}: confident poop outcome not copied to final_poop")
+        if v["final_poop"] == "poop" and (v["poop_cleared_at"] is None) != (
+            v["poop_cleared_by"] is None
+        ):
+            problems.append(f"{tag}: poop_cleared_at and poop_cleared_by disagree")
+        if v["final_poop"] != "poop" and v["poop_cleared_by"] not in (None, "owner", "migration"):
+            problems.append(f"{tag}: a poop that is not counted was 'cleared' by the system")
     state = await _async_state(rig)
     try:
         json.dumps(state)
@@ -322,6 +340,10 @@ async def _check(rig, errors, seed):
 
     if state["pee_today"] != Counting(store).pees_today(service._clock()):
         problems.append("pee_today differs from Counting")
+    if state["poop_today"] != Counting(store).poops_today(service._clock()):
+        problems.append("poop_today differs from Counting")
+    if state["poop_present"]["on"] != bool(store.open_poops()):
+        problems.append("poop_present disagrees with the open poops")
     if state["review_queue"]["count"] != len(store.review_queue(200)):
         problems.append("review queue count differs from the store")
     current = store.current_pad_change()
