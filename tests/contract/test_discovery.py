@@ -35,6 +35,10 @@ IDS = {
     "sensor.ellie_poop_daily_history",
     "binary_sensor.ellie_poop_present",
     "image.ellie_poop_photo",
+    "sensor.ellie_poop_hours_since",
+    "sensor.ellie_poop_typical_time",
+    "sensor.ellie_poop_interval_hours",
+    "sensor.ellie_poop_per_day",
 }
 ABBREV = {
     "dev",
@@ -72,6 +76,19 @@ FULL = {
         "visit_id": "v1",
         "where": "beside_tray",
         "image": "p.jpg",
+    },
+    "poop_habits": {
+        "window_days": 14,
+        "n": 11,
+        "ready": True,
+        "last_at": "2026-11-05T06:13:00Z",
+        "hours_since": 5.8,
+        "typical_time": "09:37",
+        "typical_from": "08:14",
+        "typical_to": "18:00",
+        "interval_hours": 15.1,
+        "per_day": 1.5,
+        "periods": {"madrugada": 2, "manha": 6, "tarde": 1, "noite": 2},
     },
     "visits_today": 5,
     "uncertain_open": 1,
@@ -148,6 +165,19 @@ NULLED = {
         "visit_id": None,
         "where": None,
         "image": None,
+    },
+    "poop_habits": {
+        "window_days": 14,
+        "n": 0,
+        "ready": False,
+        "last_at": None,
+        "hours_since": None,
+        "typical_time": None,
+        "typical_from": None,
+        "typical_to": None,
+        "interval_hours": None,
+        "per_day": None,
+        "periods": {"madrugada": 0, "manha": 0, "tarde": 0, "noite": 0},
     },
     "last_visit": None,
     "pad": None,
@@ -251,3 +281,28 @@ def test_poop_entities_render() -> None:
         "image": "p.jpg",
     }
     assert BY_ID["binary_sensor.ellie_poop_present"]["payload_on"] == "ON"
+
+
+def test_poop_habit_entities_render() -> None:
+    def val(eid: str, state: dict = FULL) -> str:
+        return _render(BY_ID[eid]["value_template"], state)
+
+    assert val("sensor.ellie_poop_hours_since") == "5.8"
+    assert val("sensor.ellie_poop_hours_since", NULLED) == "None"  # HA shows it as unknown
+    assert val("sensor.ellie_poop_typical_time") == "09:37"
+    assert val("sensor.ellie_poop_typical_time", NULLED) == "coletando dados"
+    assert val("sensor.ellie_poop_interval_hours") == "15.1"
+    assert val("sensor.ellie_poop_interval_hours", NULLED) == "None"
+    assert val("sensor.ellie_poop_per_day") == "1.5"
+    assert BY_ID["sensor.ellie_poop_hours_since"]["unit_of_measurement"] == "h"
+    assert BY_ID["sensor.ellie_poop_per_day"]["unit_of_measurement"] == "cocôs/dia"
+    attrs = json.loads(
+        _render(BY_ID["sensor.ellie_poop_typical_time"]["json_attributes_template"], FULL)
+    )
+    assert attrs["typical_from"] == "08:14" and attrs["typical_to"] == "18:00"
+    assert attrs["n"] == 11 and attrs["ready"] is True and attrs["window_days"] == 14
+    assert attrs["periods"]["manha"] == 6
+    last = json.loads(
+        _render(BY_ID["sensor.ellie_poop_hours_since"]["json_attributes_template"], FULL)
+    )
+    assert last == {"last_at": "2026-11-05T06:13:00Z"}

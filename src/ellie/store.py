@@ -313,6 +313,11 @@ class Store:
         )
         return [_visit_from_row(r) for r in self._db.execute(sql)]
 
+    def counted_poop_times(self) -> list[str]:
+        """Start time (ISO UTC) of every counted poop, oldest first (manual ones included)."""
+        sql = "SELECT started_at FROM visits WHERE final_poop = 'poop' ORDER BY started_at"
+        return [r[0] for r in self._db.execute(sql)]
+
     def poop_review_open(self) -> list[dict]:
         """Decided visits whose poop answer waits for the owner."""
         return self._visits("auto_poop = 'uncertain' AND final_poop IS NULL")

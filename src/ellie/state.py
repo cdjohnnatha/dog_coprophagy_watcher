@@ -6,6 +6,7 @@ from typing import Any
 from ellie.accuracy import summarize
 from ellie.counting import LOCAL_TZ, Counting
 from ellie.evidence import Evidence
+from ellie.poop_habits import compute as compute_poop_habits
 from ellie.store import Store
 from ellie.visits import iso
 
@@ -76,6 +77,9 @@ def build_state(
     corrected = store.corrected_ids(iso(now - timedelta(days=90)))
     open_poops = store.open_poops()
     last_poop = counting.last_poop(now)
+    poop_habits = compute_poop_habits(
+        [datetime.fromisoformat(t) for t in store.counted_poop_times()], now
+    )
 
     return {
         "pee_today": summary["pees"],
@@ -92,6 +96,7 @@ def build_state(
             "reason": last_pee["reason"],
         },
         "last_poop": _poop_view(evidence, last_poop),
+        "poop_habits": poop_habits,
         "poop_present": {
             "on": bool(open_poops),
             "count": len(open_poops),

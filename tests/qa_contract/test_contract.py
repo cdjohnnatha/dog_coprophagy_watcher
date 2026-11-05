@@ -82,6 +82,7 @@ def test_every_entity_id_used_in_yaml_exists():
     known |= {f"script.{k}" for k in SCRIPTS}
     known |= {
         "input_number.ellie_no_pee_alert_hours",
+        "input_number.ellie_no_poop_alert_hours",
         "input_number.ellie_gemini_credit_eur",
         "input_datetime.ellie_waking_start",
         "input_datetime.ellie_waking_end",

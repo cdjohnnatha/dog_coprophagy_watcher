@@ -11,6 +11,10 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | `sensor.ellie_poop_today` | sensor, `state_class: measurement`, unit `cocôs` | Poops counted today (`final_poop = poop`), 3.5.0 |
 | `sensor.ellie_last_poop` | sensor, `device_class: timestamp` | Start time of the most recent counted poop. Attr: `visit_id`, `where` (`on_pad` / `beside_tray` / null), `image`, `reason`, `cleared_at`, `cleared_by` (`watch` / `pad_change` / `owner` / `timeout` / `migration`) |
 | `sensor.ellie_poop_daily_history` | sensor | State = days with data (90). Attr `days`: `[{date, poops}]`, oldest first |
+| `sensor.ellie_poop_hours_since` | sensor, `state_class: measurement`, unit `h` | Hours since the last counted poop (ever, not only the 14-day window; 1 decimal; unknown when there is none). Grows every minute with no new poop. Attr: `last_at` (UTC). 3.6.0, ADR-0015 |
+| `sensor.ellie_poop_typical_time` | sensor | Usual time of day of the poops (median, local `HH:MM`) over the last 14 days, or `coletando dados` until 5 poops. Attr: `typical_from` / `typical_to` (25 % and 75 %), `n`, `ready`, `periods` (`{madrugada, manha, tarde, noite}` counts for 00-06, 06-12, 12-18, 18-24), `window_days` |
+| `sensor.ellie_poop_interval_hours` | sensor, unit `h` | Median gap between consecutive poops in the window (unknown below 3 poops) |
+| `sensor.ellie_poop_per_day` | sensor, unit `cocôs/dia` | Average per day, counted from the day of the first poop in the window (at most 14 days) |
 | `binary_sensor.ellie_poop_present` | binary_sensor (`ON`/`OFF`) | ON while a counted poop is not cleared (ADR-0014). Attr: `count`, `since`, `visit_id`, `where`, `image` (newest open poop). Clears itself: the pad watch sees the blob gone, a pad change (on-pad poops), `ellie/cmd/poop_clear`, an owner `no_poop`, or 12 h |
 | `image.ellie_poop_photo` | image (MQTT) | `after.jpg` of the poop present now, else of the last counted one |
 | `sensor.ellie_pee_daily_history` | sensor | State = days with data. Attr `days`: `[{date, pees, visits, corrected}]`, last 90 days (back-dated corrections included) |

@@ -25,3 +25,4 @@ These drafts belong to spec [003-ellie-pee-counter](../spec.md). The first imple
 | [0012](0012-prompt-pee-v2-and-pad-watch.md) | Prompt pee_v2 (+ thinking variant) and a log-only pad watch for pees Frigate never saw | proposed (2026-11-02) |
 | [0013](0013-big-photo-shows-the-clean-pad-after-a-change.md) | The big dashboard photo shows the clean pad after a pad change | accepted (2026-11-02) |
 | [0014](0014-poop-outcome-and-poop-present.md) | The poop outcome, its confirmation and a "poop present" state that clears itself | accepted (2026-11-05) |
+| [0015](0015-poop-habits.md) | Poop habits: usual time, interval and hours since the last poop (no feeder link, no prediction) | accepted (2026-11-05) |

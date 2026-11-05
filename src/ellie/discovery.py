@@ -9,6 +9,11 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
                        cleared_at | null, cleared_by | null},
     poop_present: {on: bool, count: int, since: ISO-8601 UTC | null, visit_id | null,
                    where | null, image | null},
+    poop_habits: {window_days: 14, n, ready: bool (n >= 5), last_at: ISO-8601 UTC | null,
+                  hours_since: float | null, typical_time: "HH:MM" | null,
+                  typical_from | typical_to: "HH:MM" | null, interval_hours: float | null,
+                  per_day: float | null,
+                  periods: {madrugada, manha, tarde, noite: int}},
     last_visit: null | {visit_id, auto_outcome, final_outcome, started_at, ended_at,
                         reason, poop_observed, auto_poop, final_poop, needs_review,
                         deciding_analyser},
@@ -175,6 +180,67 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 "value_template": "{{ value_json.poops_by_day | length }}",
                 "json_attributes_topic": STATE_TOPIC,
                 "json_attributes_template": _attrs(days="value_json.poops_by_day"),
+            },
+        ),
+        (
+            "sensor",
+            "poop_hours_since",
+            {
+                "name": "Horas sem cocô",
+                "state_class": "measurement",
+                "unit_of_measurement": "h",
+                "icon": "mdi:timer-sand",
+                "value_template": "{{ value_json.poop_habits.hours_since }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(last_at="value_json.poop_habits.last_at"),
+            },
+        ),
+        (
+            "sensor",
+            "poop_typical_time",
+            {
+                "name": "Horário habitual do cocô",
+                "icon": "mdi:clock-outline",
+                "value_template": (
+                    "{{ value_json.poop_habits.typical_time"
+                    " if value_json.poop_habits.ready else 'coletando dados' }}"
+                ),
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(
+                    **{
+                        k: f"value_json.poop_habits.{k}"
+                        for k in (
+                            "typical_from",
+                            "typical_to",
+                            "n",
+                            "ready",
+                            "periods",
+                            "window_days",
+                        )
+                    }
+                ),
+            },
+        ),
+        (
+            "sensor",
+            "poop_interval_hours",
+            {
+                "name": "Intervalo entre cocôs",
+                "state_class": "measurement",
+                "unit_of_measurement": "h",
+                "icon": "mdi:swap-horizontal",
+                "value_template": "{{ value_json.poop_habits.interval_hours }}",
+            },
+        ),
+        (
+            "sensor",
+            "poop_per_day",
+            {
+                "name": "Cocôs por dia",
+                "state_class": "measurement",
+                "unit_of_measurement": "cocôs/dia",
+                "icon": "mdi:emoticon-poop",
+                "value_template": "{{ value_json.poop_habits.per_day }}",
             },
         ),
         (
