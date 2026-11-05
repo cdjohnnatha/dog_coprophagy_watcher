@@ -141,6 +141,7 @@ class Service(PadsMixin):
             "pad_changed": self._cmd_pad_changed,
             "pad_undo": self._cmd_pad_undo,
             "poop_clear": self._cmd_poop_clear,
+            "manual_poop": self._cmd_manual_poop,
         }
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
@@ -297,26 +298,38 @@ class Service(PadsMixin):
         else:
             await self._apply_label(visit, label, channel, self._by(data))
 
-    async def _cmd_manual_pee(self, data: dict) -> None:
-        """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
+    def _manual_time(self, command: str, data: dict) -> datetime | None:
+        """The time of a manual entry (local if it has no zone); None, with a log, if unusable."""
         try:
             at = datetime.fromisoformat(str(data.get("at")))
             if at.tzinfo is None:
                 at = at.replace(tzinfo=LOCAL_TZ)
-            stamp = at.astimezone(LOCAL_TZ)
+            at.astimezone(LOCAL_TZ)
         except (ValueError, OverflowError):
-            log.warning("manual_pee: invalid time %r", data.get("at"))
-            return
+            log.warning("%s: invalid time %r", command, data.get("at"))
+            return None
         if at > self._clock() + timedelta(minutes=5):
-            log.warning("manual_pee: time is in the future")
-            return
+            log.warning("%s: time is in the future", command)
+            return None
         if at < self._clock() - timedelta(days=MAX_BACKDATE_DAYS):
-            log.warning("manual_pee: time is too far in the past")
-            return
+            log.warning("%s: time is too far in the past", command)
+            return None
+        return at
+
+    def _manual_visit_id(self, at: datetime) -> str:
+        stamp = at.astimezone(LOCAL_TZ)
         visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
         while self.store.get_visit(visit_id):
             stamp += timedelta(seconds=1)
             visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        return visit_id
+
+    async def _cmd_manual_pee(self, data: dict) -> None:
+        """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
+        at = self._manual_time("manual_pee", data)
+        if at is None:
+            return
+        visit_id = self._manual_visit_id(at)
         self.store.insert_visit(
             {
                 "id": visit_id,
@@ -334,6 +347,40 @@ class Service(PadsMixin):
             }
         )
         self.store.insert_label(visit_id, "pee", "manual_add", self._by(data), None)
+        await self._visit_decided(visit_id, None)
+
+    async def _cmd_manual_poop(self, data: dict) -> None:
+        """`ellie/cmd/manual_poop`: a poop the system missed (ADR-0014 amendment).
+
+        Counted for its day but never "present": the owner saw it and handles it, so it is
+        recorded as already cleared. It says nothing about the pee of that visit.
+        """
+        at = self._manual_time("manual_poop", data)
+        if at is None:
+            return
+        where = data.get("where") if data.get("where") in ("on_pad", "beside_tray") else "none"
+        visit_id = self._manual_visit_id(at)
+        self.store.insert_visit(
+            {
+                "id": visit_id,
+                "source": "manual",
+                "started_at": iso(at),
+                "ended_at": iso(at),
+                "entries": 1,
+                "person_present": False,
+                "frigate_event_ids": [],
+                "state": "LABELLED",
+                "final_outcome": "no_pee",
+                "auto_poop": None,
+                "final_poop": "poop",
+                "poop_cleared_at": iso(at),
+                "poop_cleared_by": "owner",
+                "poop_observed": where,
+                "reason": "cocô adicionado manualmente",
+                "needs_review": False,
+            }
+        )
+        self.store.insert_label(visit_id, "poop", "manual_add", self._by(data), None, kind="poop")
         await self._visit_decided(visit_id, None)
 
     async def _open_watch_visit(self, found: Candidate) -> None:

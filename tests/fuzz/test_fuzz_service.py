@@ -101,6 +101,7 @@ async def random_command(rig, rnd, clock):
         [
             "label",
             "manual_pee",
+            "manual_poop",
             "reject_last",
             "reanalyse",
             "poop_clear",
@@ -128,6 +129,17 @@ async def random_command(rig, rnd, clock):
                     5,
                 ]
             )
+        },
+        "manual_poop": {
+            "at": rnd.choice(
+                [
+                    (local - timedelta(hours=rnd.randint(0, 120))).strftime("%Y-%m-%d %H:%M:%S"),
+                    (local + timedelta(hours=3)).isoformat(),
+                    "banana",
+                    None,
+                ]
+            ),
+            "where": rnd.choice(["on_pad", "beside_tray", "x", None, [], 3]),
         },
         "reject_last": {},
         "reanalyse": {"visit_id": pick(visit_ids)},

@@ -289,3 +289,18 @@ async def test_back_dated_pad_change_is_silently_ignored_when_a_newer_exists(rig
     assert last_state(rig)["pad"]["changed_at"] == "2026-07-10T09:00:00Z"
     await cmd(rig, "pad_undo")
     assert last_state(rig)["pad"]["changed_at"] == "2026-07-06T09:00:00Z"
+
+
+async def test_manual_poop_script_renders_and_the_app_counts_it(rig):
+    ha = Ha({}, NOW)
+    _, payload = render_payload(
+        "ellie_add_manual_poop", ha, at="2026-07-10 18:30:00", where="on_pad"
+    )
+    await rig.service.on_command("manual_poop", payload.encode())
+    (v,) = rig.store.visits_started_between("2026-07-10T00:00:00Z", "2026-07-11T00:00:00Z")
+    assert v["final_poop"] == "poop" and v["poop_observed"] == "on_pad"
+    _, without = render_payload("ellie_add_manual_poop", ha, at="2026-07-10 19:30:00")
+    await rig.service.on_command("manual_poop", without.encode())
+    assert (
+        len(rig.store.visits_started_between("2026-07-10T00:00:00Z", "2026-07-11T00:00:00Z")) == 2
+    )
