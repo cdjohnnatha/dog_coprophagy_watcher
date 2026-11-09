@@ -137,6 +137,11 @@ MIGRATIONS: list[str] = [
     ALTER TABLE labels_new RENAME TO labels;
     CREATE INDEX idx_labels_visit ON labels(visit_id);
     """,
+    # 7: where the pee was (prompt pee_v4); a pee outside the pad means the pad is full
+    """
+    ALTER TABLE visits ADD COLUMN pee_where TEXT
+        CHECK (pee_where IN ('none', 'on_pad', 'off_pad', 'both'));
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -162,6 +167,7 @@ _VISIT_COLUMNS = (
     "final_poop",
     "poop_cleared_at",
     "poop_cleared_by",
+    "pee_where",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -423,6 +429,20 @@ class Store:
             (start_iso, end_iso, end_iso),
         ).fetchone()
         return int(row["n"])
+
+    def pees_list_between(self, start_iso: str, end_iso: str | None) -> list[dict]:
+        """Counted pee visits from `start_iso` (included) to `end_iso` (excluded), oldest first."""
+        return self._visits(
+            "final_outcome = 'pee' AND started_at >= ? AND (? IS NULL OR started_at < ?)",
+            (start_iso, end_iso, end_iso),
+        )
+
+    def pad_changes_since(self, start_iso: str) -> list[dict]:
+        """Pad changes (undone ones too) at or after `start_iso`, newest first."""
+        rows = self._db.execute(
+            "SELECT * FROM pad_changes WHERE at >= ? ORDER BY at DESC", (start_iso,)
+        )
+        return [dict(r) for r in rows]
 
     def poops_between(self, start_iso: str, end_iso: str | None) -> int:
         """Counted poops from `start_iso` (included) to `end_iso` (excluded; None = until now)."""

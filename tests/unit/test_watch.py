@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from ellie.watch import LIGHT_JUMP, PAD_BOX, PENDING_TTL_S, PadWatch
+from ellie.watch import LIGHT_JUMP, PAD_BOX, PENDING_TTL_S, PadWatch, floor_blob
 
 START = datetime(2026, 11, 3, 14, 0, tzinfo=UTC)
 
@@ -268,3 +268,31 @@ def test_untracking_forgets_the_poop() -> None:
     minute(w, clock, clean)
     minute(w, clock, clean)
     assert w.take_cleared() == []
+
+
+def test_a_candidate_frame_with_her_in_it_is_confirmed_by_the_lasting_change() -> None:
+    """2026-11-07 08:52: Frigate did not see her, the candidate frame had her at the pad and no
+    later frame matched it. The pad still differs from the frame before: confirm on that frame."""
+    w, clock = watch()
+    clean, with_her, stain = frame(), frame(pad=15), frame(pad=95)
+    minute(w, clock, clean)
+    assert minute(w, clock, with_her) is None  # candidate
+    found = minute(w, clock, stain)  # she left, the stain stays
+    assert found is not None and found.before_jpeg == clean and found.after_jpeg == stain
+
+
+def test_a_candidate_that_went_back_to_the_frame_before_is_not_lasting() -> None:
+    w, clock = watch()
+    minute(w, clock, frame())
+    minute(w, clock, frame(pad=15))  # a paw, a shadow
+    assert minute(w, clock, frame()) is None  # the pad is as before: nothing lasting
+    assert w.confirmed_total == 0
+
+
+def test_floor_blob_sees_the_poop_gemini_missed_and_nothing_on_a_quiet_floor() -> None:
+    fixtures = Path(__file__).parent.parent / "fixtures" / "poop_0613"
+    before, after = (fixtures / "before.jpg").read_bytes(), (fixtures / "after.jpg").read_bytes()
+    assert floor_blob(before, after) is not None  # 2026-11-05 06:13, beside the tray
+    assert floor_blob(before, before) is None
+    assert floor_blob(frame(), frame(pad=60)) is None  # a pee on the pad is not a floor blob
+    assert floor_blob(b"not a jpeg", before) is None

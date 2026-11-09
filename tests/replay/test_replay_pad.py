@@ -288,3 +288,89 @@ async def test_one_finished_pad_is_too_few_for_an_average_and_an_undone_change_i
     pad = rig.service.pad_state(rig.clock())
     assert [h["pees"] for h in pad["history"]] == [None, None, 1]
     assert pad["pads_counted"] == 1 and pad["avg_pees_per_pad"] is None
+
+
+async def test_a_cleanup_of_a_poop_nobody_counted_counts_it(rig):
+    """A poop Frigate never saw (2026-11-03 10:00, 11-04 07:28): the owner's cleanup finds it."""
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
+    rig.analyser.script(make_result(pee=False, poop="none"))  # the elimination check: nothing new
+    await person_at_the_tray(rig)
+    (presence,) = presences(rig)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    assert visit["started_at"] == presence["started_at"] and visit["source"] == "auto"
+    assert visit["final_poop"] == "poop" and visit["poop_cleared_by"] == "owner"
+    assert visit["final_outcome"] == "no_pee" and visit["needs_review"] is True
+    assert (rig.evidence.visit_dir(visit["id"]) / "before.jpg").exists()
+    state = last_state(rig)
+    assert state["poop_today"] == 1 and state["poop_present"]["on"] is False
+
+
+async def test_a_cleanup_of_a_counted_poop_counts_nothing_new(rig):
+    rig.analyser.script(make_result(pee=False, poop="on_pad", poop_confidence=0.95))
+    await one_visit(rig)
+    rig.analyser.script(make_result(pee=False, poop="none"))
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
+    await person_at_the_tray(rig)
+    assert len(rig.store.visits_started_between("2026", "2028")) == 1
+
+
+async def _clear_minute(rig):
+    for _ in range(60):
+        rig.clock.advance(1)
+        await rig.service.tick()
+    await rig.service.minute_tasks()
+    await rig.service.wait_idle()
+
+
+async def test_an_occluded_frame_is_taken_again_instead_of_asking(rig):
+    """2026-11-09 13:08: the owner was still in the after frame; the next "before" was that frame."""
+    rig.analyser.script_pad(
+        make_pad_result(image_quality="occluded", pad_replaced_confidence=0.3),
+        make_pad_result(pad_replaced=True, pad_replaced_confidence=0.95),
+    )
+    await person_at_the_tray(rig)
+    (presence,) = presences(rig)
+    assert presence["state"] == "ANALYSING"  # waiting, not asking
+    assert topics(rig, "ellie/review/request") == []
+    occluded = (rig.evidence.presence_dir(presence["id"]) / "after.jpg").read_bytes()
+    assert rig.reference.latest()[0] != occluded or rig.reference.latest() is None
+    await _clear_minute(rig)
+    (presence,) = presences(rig)
+    assert presence["final_outcome"] == "replaced" and len(rig.analyser.pad_calls) == 2
+    assert topics(rig, "ellie/review/request") == []
+
+
+async def test_an_always_occluded_frame_asks_after_the_retakes(rig):
+    rig.analyser.script_pad(make_pad_result(image_quality="occluded"))
+    await person_at_the_tray(rig)
+    for _ in range(4):
+        await _clear_minute(rig)
+    (presence,) = presences(rig)
+    assert presence["auto_outcome"] == "uncertain" and len(rig.analyser.pad_calls) == 4
+    assert [r["kind"] for r in topics(rig, "ellie/review/request")] == ["pad_uncertain"]
+
+
+async def test_a_pee_outside_the_pad_says_the_pad_is_full_and_pads_get_stats(rig):
+    await command(rig, "pad_changed")
+    rig.analyser.script(
+        make_result(pee_where="on_pad"),
+        make_result(pee_where="on_pad"),
+        make_result(pee_where="off_pad", reason="poça nova no chão abaixo da bandeja"),
+    )
+    for _ in range(3):
+        rig.clock.advance(4 * 3600)
+        await one_visit(rig)
+    (full,) = topics(rig, "ellie/pad/full")
+    assert full["pees_since"] == 3 and full["image"].endswith("after.jpg")
+    pad = last_state(rig)["pad"]
+    assert pad["history"][0]["overflow_pee"] == 3 and pad["history"][0]["pees"] is None
+    rig.clock.advance(12 * 3600)
+    await command(rig, "pad_changed")
+    rig.clock.advance(36 * 3600)
+    await command(rig, "pad_changed")
+    pad = last_state(rig)["pad"]
+    finished = pad["history"][2]
+    assert finished["pees"] == 3 and finished["overflow_pee"] == 3 and finished["days"] == 1.0
+    assert finished["pees_per_day"] == 3.0
+    assert pad["avg_days_per_pad"] == 1.2 and pad["pads_per_month"] == 25.0
+    assert pad["pads_last_30d"] == 3 and pad["overflow_pees"] == [3]

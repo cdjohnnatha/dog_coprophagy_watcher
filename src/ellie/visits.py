@@ -13,6 +13,14 @@ One visit is active at a time:
 A re-entry while CLOSING or CAPTURING reopens the same visit: its after frame has not been
 taken yet, so one before/after pair still covers the whole stay. Once the after frame is due
 the visit is handed over (`capture_after`) and the tracker is free for the next one.
+
+When she leaves and nobody is in tray_area, the tracker also asks for a `dog_left` frame. If a
+person walks in before the after frame (the owner cleaning a poop right away, 2026-11-09 08:24),
+that earlier frame is the one that still shows what she left.
+
+A few seconds into a visit the tracker asks for an own `during` frame: Frigate drops a tracked dog
+whose score never reached its threshold (squatting to poop, 2026-11-09 08:23), and then its event
+snapshot does not exist.
 """
 
 from collections import deque
@@ -23,9 +31,10 @@ from typing import Any, Literal
 
 from ellie.counting import LOCAL_TZ
 
-ActionKind = Literal["started", "updated", "capture_after", "unknown"]
+ActionKind = Literal["started", "updated", "during", "dog_left", "capture_after", "unknown"]
 
 PENDING_EVENT_TTL_S = 15
+DURING_AFTER_S = 8  # an own "during" frame this long into the visit (Frigate may drop the event)
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,7 @@ class _Visit:
     on_pad_s: float = 0.0
     capturing_since: datetime | None = None
     open_since: datetime | None = None
+    during_asked: bool = False
 
     def row(self) -> dict[str, Any]:
         return {
@@ -134,7 +144,10 @@ class VisitTracker:
             return []
         self._flush_on_pad(now)
         visit.state, visit.ended_at = "CLOSING", now
-        return [Action("updated", visit.row())]
+        actions = [Action("updated", visit.row())]
+        if self._area_person == 0:  # nobody there yet: a frame now shows what she left
+            actions.append(Action("dog_left", visit.row()))
+        return actions
 
     def on_tray_person(self, count: int, now: datetime) -> list[Action]:
         """`frigate/tray_area/person`: flags the visit and blocks the "clear" state."""
@@ -198,6 +211,13 @@ class VisitTracker:
         actions: list[Action] = []
         if visit is None:
             return actions
+        if (
+            visit.state == "OPEN"
+            and not visit.during_asked
+            and (now - visit.started_at).total_seconds() >= DURING_AFTER_S
+        ):
+            visit.during_asked = True
+            actions.append(Action("during", visit.row()))
         if visit.state == "OPEN" and (now - visit.open_since).total_seconds() >= self.max_open_s:
             visit.state, visit.ended_at = "CLOSING", now  # treat it as if she had left
             self._pad_dog, self._area_dog = False, 0

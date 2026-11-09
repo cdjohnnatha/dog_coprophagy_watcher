@@ -55,6 +55,7 @@ async def main() -> None:
                 ("pee_v2", "minimal"),
                 ("pee_v2", "medium"),
                 ("pee_v3", "minimal"),
+                ("pee_v4", "minimal"),  # pee_v3 + where the pee is (pad full, ADR-0017)
             )
             for prompt, thinking in variants:
                 gemini = GeminiAnalyser(

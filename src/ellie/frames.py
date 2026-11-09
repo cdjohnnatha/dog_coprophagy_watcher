@@ -122,6 +122,18 @@ class ReferenceKeeper:
         self._cache = (jpeg_crop, now)
         self._history.append(self._cache)
 
+    def discard(self, jpeg_crop: bytes) -> None:
+        """Forget a frame that turned out to show someone (2026-11-09 13:08: an occluded after
+        frame became the "before" of the next presence). The newest remaining one is kept."""
+        self._history = deque((h for h in self._history if h[0] != jpeg_crop),
+                              maxlen=HISTORY_SIZE)  # fmt: skip
+        if self._cache is not None and self._cache[0] == jpeg_crop:
+            self._cache = self._history[-1] if self._history else None
+            if self._cache is not None:
+                _atomic_write(self._dir / "latest.jpg", self._cache[0])
+                meta = json.dumps({"at": self._cache[1].isoformat()}).encode()
+                _atomic_write(self._dir / "latest.json", meta)
+
     def before(
         self, moment: datetime, lag_s: float = REFERENCE_LAG_S
     ) -> tuple[bytes, datetime] | None:

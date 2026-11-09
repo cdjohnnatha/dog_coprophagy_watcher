@@ -24,6 +24,7 @@ IDS = {
     "switch.ellie_validation_mode",
     "sensor.ellie_pad_changed_at",
     "sensor.ellie_pees_per_pad",
+    "sensor.ellie_pads_last_30d",
     "sensor.ellie_pad_change_due",
     "number.ellie_pad_change_days",
     "image.ellie_last_pee_photo",
@@ -152,6 +153,10 @@ FULL = {
         "image": "p.jpg",
         "image_at": "2026-10-27T10:00:00Z",
         "history": [],
+        "avg_days_per_pad": 2.4,
+        "pads_per_month": 12.5,
+        "pads_last_30d": 9,
+        "overflow_pees": [6],
     },
 }
 NULLED = {

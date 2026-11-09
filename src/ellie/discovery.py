@@ -28,7 +28,9 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
                validation_mode: bool, pad_change_days: int},
     pad: null | {changed_at, due_at | null, source, days_in_use: float, pees_since: int,
                  avg_pees_per_pad: float | null, pads_counted: int,
-                 pad_color: str | null, image: str | null, history: [...]}
+                 pad_color: str | null, image: str | null, history: [...],
+                 avg_days_per_pad: float | null, pads_per_month: float | null,
+                 pads_last_30d: int, overflow_pees: [int]}
 
 Commands arrive on ``ellie/set/<setting>``; availability on ``ellie/status``.
 Five image entities get raw JPEG bytes (retained) on the topics in ``IMAGE_TOPICS``: HA serves
@@ -101,6 +103,10 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
         "image",
         "image_at",
         "history",
+        "avg_days_per_pad",
+        "pads_per_month",
+        "pads_last_30d",
+        "overflow_pees",
     ]
     lo_c, hi_c = RUNTIME_RANGES["confidence_threshold"]
     lo_m, hi_m = RUNTIME_RANGES["merge_gap_s"]
@@ -404,6 +410,21 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 "value_template": "{{ " + _opt("pad", "avg_pees_per_pad") + " }}",
                 "json_attributes_topic": STATE_TOPIC,
                 "json_attributes_template": _attrs(pads_counted=_opt("pad", "pads_counted")),
+            },
+        ),
+        (
+            "sensor",
+            "pads_last_30d",
+            {
+                "name": "Tapetes usados (30 dias)",
+                "state_class": "measurement",
+                "icon": "mdi:layers-triple",
+                "value_template": "{{ " + _opt("pad", "pads_last_30d") + " }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(
+                    pads_per_month=_opt("pad", "pads_per_month"),
+                    avg_days_per_pad=_opt("pad", "avg_days_per_pad"),
+                ),
             },
         ),
         (

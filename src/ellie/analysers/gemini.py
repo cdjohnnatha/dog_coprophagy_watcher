@@ -39,6 +39,8 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "pad_replaced": {"type": "boolean", "description": "The pad itself was changed or the tray cleaned."},
         "image_quality": {"type": "string", "enum": _IMAGE_QUALITY},
         "night_mode": {"type": "boolean", "description": "Images are infrared/black-and-white."},
+        "pee_where": {"type": "string", "enum": ["none", "on_pad", "off_pad", "both"],
+                      "description": "Where the new pee is: on the pad, outside it, or both."},
         "reason": {"type": "string", "description": "Short explanation in Brazilian Portuguese, at most 140 characters."},
     },
     "required": [

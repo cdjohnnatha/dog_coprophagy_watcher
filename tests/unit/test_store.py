@@ -26,7 +26,7 @@ def visit(vid="v_20260101_100000", **over):
 
 
 def test_migration_creates_tables(store):
-    assert store.schema_version() == len(MIGRATIONS) == 6
+    assert store.schema_version() == len(MIGRATIONS) == 7
     names = {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"visits", "analyses", "settings"} <= names
 
@@ -35,7 +35,7 @@ def test_migration_twice_is_noop(tmp_path):
     path = str(tmp_path / "x.db")
     Store(path).close()
     s = Store(path)
-    assert s.schema_version() == 6
+    assert s.schema_version() == 7
     s.close()
 
 
@@ -169,7 +169,7 @@ def test_migration_6_backfills_old_visits_and_keeps_old_labels(tmp_path) -> None
     db.close()
 
     store = Store(path)
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
     got = {v["id"]: v for v in store.visits_started_between("2026", "2027")}
     assert (got["a"]["auto_poop"], got["a"]["final_poop"]) == ("poop", "poop")
     assert got["a"]["poop_cleared_by"] == "migration" and store.open_poops() == []
@@ -186,3 +186,13 @@ def test_migration_6_backfills_old_visits_and_keeps_old_labels(tmp_path) -> None
     with pytest.raises(sqlite3.IntegrityError):
         store.insert_label("a", "poop", "dashboard", None, None, kind="pee-ish")
     store.close()
+
+
+def test_migration_7_adds_pee_where_and_checks_it(tmp_path):
+    from helpers import make_visit
+
+    store = Store(str(tmp_path / "e.db"))
+    store.insert_visit(make_visit(pee_where="off_pad"))
+    assert store.get_visit("v_20261029_101530")["pee_where"] == "off_pad"
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_visit(make_visit(id="v_20261029_101531", pee_where="floor"))

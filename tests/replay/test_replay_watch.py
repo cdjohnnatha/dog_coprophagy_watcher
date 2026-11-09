@@ -120,3 +120,40 @@ async def test_a_poop_on_the_floor_right_after_a_visit_opens_a_floor_visit(rig):
     assert (directory / "before.jpg").read_bytes() == clean
     assert (directory / "after.jpg").read_bytes() == floor_poop(clean)
     assert len(rig.analyser.calls) == 1
+
+
+def pad_frame(value: int, size: int = 200) -> bytes:
+    """`frame(stained=True)` with another grey on the pad (her body, or a pee of another tone)."""
+    img = Image.open(io.BytesIO(frame()))
+    px = img.load()
+    x1, y1, x2, y2 = PAD_BOX
+    cx, cy = int((x1 + x2) / 2 * size), int((y1 + y2) / 2 * size)
+    for y in range(cy - 25, cy + 25):
+        for x in range(cx - 25, cx + 25):
+            px[x, y] = value
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+async def _her_then_a_stain(rig):
+    for _ in range(2):
+        await minute(rig, frame())  # quiet
+    await minute(rig, pad_frame(15))  # candidate frame: she is still there
+    await minute(rig, pad_frame(95))  # she left, the stain stays: a lasting change
+
+
+async def test_a_lasting_change_on_a_quiet_tray_opens_a_visit(rig):
+    await _her_then_a_stain(rig)
+    (visit,) = auto_visits(rig)
+    after = (rig.evidence.visit_dir(visit["id"]) / "after.jpg").read_bytes()
+    assert after == pad_frame(95)  # Gemini judges the frame without her
+
+
+async def test_a_lasting_change_right_after_a_pad_change_is_ignored(rig):
+    """2026-11-09 13:17 and 13:28: the owner lifted the tray, cleaned it and put it back."""
+    await rig.service.on_command("pad_changed", b"{}")
+    for _ in range(10):  # 10 quiet minutes: well past the 3 min window, inside the 30 min one
+        await minute(rig, frame())
+    await _her_then_a_stain(rig)
+    assert auto_visits(rig) == [] and rig.analyser.calls == []

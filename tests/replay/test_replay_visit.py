@@ -6,7 +6,7 @@ import pytest
 
 from ellie.analysers.base import AnalyserError
 from ellie.frames import FrameError
-from helpers import FakeClock, build_rig, make_jpeg, make_result, make_visit
+from helpers import FakeClock, build_rig, make_jpeg, make_pad_result, make_result, make_visit
 
 EVENT = {
     "after": {
@@ -251,7 +251,7 @@ async def test_connecting_publishes_discovery_and_state(rig):
     await rig.service.on_connect()
     configs = [(t, r) for t, _, r in rig.published if t.startswith("homeassistant/")]
     # 25 = 20 + poop today, last poop, poop history, poop present and the poop photo (3.5.0)
-    assert len(configs) == 29 and all(retained for _, retained in configs)
+    assert len(configs) == 30 and all(retained for _, retained in configs)
     state = [(b, r) for t, b, r in rig.published if t == "ellie/state"][-1]
     assert state[1] is True and state[0]["pee_today"] == 0
     assert {
@@ -313,3 +313,97 @@ async def test_an_event_that_only_entered_tray_area_belongs_to_the_visit(rig):
     event = {"after": {**EVENT["after"], "entered_zones": ["tray_area"]}}
     await rig.service.on_message("frigate/events", json.dumps(event).encode())
     assert rig.service.tracker.active["frigate_event_ids"] == [EVENT["after"]["id"]]
+
+
+DOG = make_jpeg((10, 10, 10))  # the own "during" frame, taken while she is there
+
+
+def _camera(rig_frames):
+    """A camera that shows each queued frame in turn (the last one keeps repeating)."""
+
+    async def fetch_frame():
+        return rig_frames.pop(0) if len(rig_frames) > 1 else rig_frames[0]
+
+    return fetch_frame
+
+
+async def _poop_then_cleaned(rig, person_in_between=True):
+    """2026-11-09 08:22: she poops, leaves, the owner cleans before the after frame is due."""
+    await rig.service.tick()
+    await send(rig, "frigate/pad_zone/dog", 1)
+    await send(rig, "frigate/tray_area/dog", 1)
+    await advance(rig, 30)
+    await send(rig, "frigate/pad_zone/dog", 0)
+    await send(rig, "frigate/tray_area/dog", 0)  # exit frame: the poop is there
+    await advance(rig, 20)
+    if person_in_between:
+        await send(rig, "frigate/tray_area/person", 1)
+        await advance(rig, 50)
+        await send(rig, "frigate/tray_area/person", 0)
+    await advance(rig, 100)
+
+
+async def test_the_exit_frame_is_judged_when_a_person_came_before_the_after_frame(tmp_path, clock):
+    exit_frame, cleaned = make_jpeg((60, 40, 20)), make_jpeg((200, 200, 200))
+    rig = build(tmp_path, clock, fetch_frame=_camera([DOG, exit_frame, cleaned]))
+    rig.reference.update(make_jpeg((200, 200, 200)))
+    rig.analyser.script(make_result(pee=False, poop="on_pad", poop_confidence=0.95))
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
+    await _poop_then_cleaned(rig)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    directory = rig.evidence.visit_dir(visit["id"])
+    assert (directory / "after.jpg").read_bytes() == exit_frame  # Gemini saw the poop
+    assert (directory / "after_person.jpg").read_bytes() == cleaned
+    assert rig.analyser.calls[0]["after_len"] == len(exit_frame)
+    assert visit["final_poop"] == "poop"  # counted
+    assert visit["poop_cleared_by"] == "owner"  # and already cleaned by the person
+    assert rig.analyser.pad_calls == [{"before_len": len(exit_frame), "after_len": len(cleaned)}]
+
+
+async def test_a_pad_swap_by_the_person_after_her_is_recorded(tmp_path, clock):
+    rig = build(tmp_path, clock, fetch_frame=_camera([DOG, make_jpeg((60, 40, 20)), make_jpeg()]))
+    rig.reference.update(make_jpeg((200, 200, 200)))
+    rig.analyser.script_pad(make_pad_result(pad_replaced=True, pad_replaced_confidence=0.95))
+    await _poop_then_cleaned(rig)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    assert rig.store.current_pad_change()["visit_id"] == visit["id"]
+
+
+async def test_without_a_person_the_late_frame_is_judged_as_before(tmp_path, clock):
+    exit_frame, late = make_jpeg((60, 40, 20)), make_jpeg((150, 150, 150))
+    rig = build(tmp_path, clock, fetch_frame=_camera([DOG, exit_frame, late]))
+    rig.reference.update(make_jpeg((200, 200, 200)))
+    await _poop_then_cleaned(rig, person_in_between=False)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    directory = rig.evidence.visit_dir(visit["id"])
+    assert (directory / "after.jpg").read_bytes() == late
+    assert not (directory / "after_person.jpg").exists()
+    assert rig.analyser.pad_calls == []
+
+
+async def test_an_own_during_frame_replaces_a_missing_frigate_snapshot(tmp_path, clock):
+    """2026-11-09 08:23: Frigate dropped the low-score dog, its snapshot was a 404."""
+
+    async def no_snapshot(event_id):
+        return None
+
+    rig = build(tmp_path, clock, fetch_frame=_camera([DOG, make_jpeg()]),
+                fetch_snapshot=no_snapshot)  # fmt: skip
+    rig.reference.update(make_jpeg((200, 200, 200)))
+    await one_visit(rig)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    directory = rig.evidence.visit_dir(visit["id"])
+    assert (directory / "during.jpg").read_bytes() == DOG
+    assert rig.analyser.calls[0]["during_len"] == len(DOG)
+    rig.store.close()
+
+
+async def test_a_person_removing_a_poop_gemini_did_not_see_counts_it(tmp_path, clock):
+    rig = build(tmp_path, clock, fetch_frame=_camera([DOG, make_jpeg((60, 40, 20)), make_jpeg()]))
+    rig.reference.update(make_jpeg((200, 200, 200)))
+    rig.analyser.script(make_result(pee=False, poop="none"))
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
+    await _poop_then_cleaned(rig)
+    (visit,) = rig.store.visits_started_between("2026", "2028")
+    assert visit["final_poop"] == "poop" and visit["poop_cleared_by"] == "owner"
+    assert visit["needs_review"] is True

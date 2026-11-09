@@ -86,7 +86,7 @@ async def test_the_poop_of_2026_11_05_0613_is_counted_and_present(rig):
 
 
 async def test_a_confident_no_poop_is_not_present(tmp_path, clock):
-    rig = make_rig(tmp_path, clock)
+    rig = make_rig(tmp_path, clock, {"jpeg": BEFORE})  # nothing new on the floor either
     await one_visit(rig)
     (visit,) = visits(rig)
     assert visit["final_poop"] == "no_poop"
@@ -199,7 +199,7 @@ async def test_an_owner_poop_on_a_no_poop_visit_makes_it_present(tmp_path, clock
     rig = make_rig(tmp_path, clock)
     await one_visit(rig)
     (visit,) = visits(rig)
-    assert visit["final_poop"] == "no_poop"
+    assert visit["final_poop"] != "poop"  # no_poop, or asked because of the blob
     await command(rig, "label", visit_id=visit["id"], kind="poop", label="poop")
     state = last_state(rig)
     assert state["poop_today"] == 1 and state["poop_present"]["on"] is True
@@ -296,4 +296,15 @@ async def test_a_failed_analysis_has_no_poop_answer(tmp_path, clock):
     (visit,) = visits(rig)
     assert (visit["auto_poop"], visit["final_poop"]) == ("unknown", "unknown")
     assert last_state(rig)["poop_today"] == 0
+    rig.store.close()
+
+
+async def test_a_blob_gemini_missed_asks_the_owner(tmp_path, clock):
+    """2026-11-05 06:13: the poop is in the after photo, Gemini answered "none"."""
+    rig = make_rig(tmp_path, clock)  # after = the real 06:13 photo
+    await one_visit(rig)
+    (visit,) = visits(rig)
+    assert visit["auto_poop"] == "uncertain" and visit["final_poop"] is None
+    asked = [b for b in topics(rig, "ellie/review/request") if b.get("kind") == "poop"]
+    assert asked and asked[0]["visit_id"] == visit["id"]
     rig.store.close()

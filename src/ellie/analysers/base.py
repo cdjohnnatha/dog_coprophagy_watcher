@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 ImageQuality = Literal["ok", "occluded", "too_dark", "camera_moved"]
 PoopObserved = Literal["none", "on_pad", "beside_tray", "unsure"]
 PadColor = Literal["white", "grey", "unknown"]
+PeeWhere = Literal["none", "on_pad", "off_pad", "both"]
 
 
 class AnalyserError(Exception):
@@ -31,6 +32,7 @@ class AnalysisResult(BaseModel):
     pad_replaced: bool
     image_quality: ImageQuality
     night_mode: bool | None = None
+    pee_where: PeeWhere | None = None  # pee_v4: on the pad, outside it (pad full), or both
     reason: str = Field(max_length=140)
 
 

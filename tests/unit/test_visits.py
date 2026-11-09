@@ -50,7 +50,7 @@ def test_single_visit_from_entry_to_capture(tracker, clock):
     assert row["started_at"] == "2026-10-29T12:00:00Z"
 
     clock.advance(10)
-    assert kinds(leave(tracker, clock)) == ["updated"]
+    assert kinds(leave(tracker, clock)) == ["updated", "dog_left"]
     assert tracker.active["state"] == "CLOSING"
     assert tracker.active["ended_at"] == "2026-10-29T12:00:10Z"
 
@@ -247,7 +247,7 @@ def test_a_left_message_closes_the_visit_even_after_frigate_went_away_and_came_b
     enter(tracker, clock)  # she is there, counted while Frigate was flagged offline
     tracker.on_frigate_available(True, clock())  # forgets them again, visit still OPEN
     clock.advance(5)
-    assert kinds(leave(tracker, clock)) == ["updated"]
+    assert kinds(leave(tracker, clock)) == ["updated", "dog_left"]
     assert tracker.active["state"] == "CLOSING"
 
 
@@ -257,3 +257,23 @@ def test_a_visit_open_for_hours_is_closed_when_the_left_message_was_lost(tracker
     tracker.on_tray_dog(0, clock())  # she left the area, but pad_zone's "0" never arrived
     actions = run(tracker, clock, 7300, step=10)
     assert "capture_after" in kinds(actions) and tracker.active is None
+
+
+def test_no_exit_frame_is_asked_while_a_person_is_already_there(tracker, clock):
+    tracker.tick(clock())
+    enter(tracker, clock)
+    tracker.on_tray_person(1, clock())
+    clock.advance(5)
+    assert kinds(leave(tracker, clock)) == ["updated"]  # the frame would show the person
+
+
+def test_every_exit_asks_for_its_own_frame(tracker, clock):
+    tracker.tick(clock())
+    enter(tracker, clock)
+    clock.advance(5)
+    first = [a for a in leave(tracker, clock) if a.kind == "dog_left"]
+    clock.advance(10)
+    enter(tracker, clock)
+    clock.advance(5)
+    second = [a for a in leave(tracker, clock) if a.kind == "dog_left"]
+    assert first[0].visit["entries"] == 1 and second[0].visit["entries"] == 2

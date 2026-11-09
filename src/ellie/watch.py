@@ -38,6 +38,9 @@ STEP_RATIO = 2.0  # the pad must change this many times more than the floor
 CTRL_MAX = 0.10  # more than this at the floor is light, not a pee
 CONFIRM_MAX = 0.06  # a later frame confirms when the pad is within this of the candidate frame
 PENDING_TTL_S = 300  # a candidate waits this long for a frame that confirms it
+# A later frame whose pad still differs this much from the frame BEFORE the candidate confirms it
+# too (the pee stays, she does not). Pees on a stained pad step 0.12-0.21, quiet minutes ~0.03.
+LASTING_MIN = 0.10
 # Poop on the floor or the tray rim (2026-11-03 10:00, 11-04 07:28, 11-05 06:13): a small DARK blob
 # appears outside the pad. It is a few pixels wide, so the mean over the floor hides it; the peak of
 # the darkening over a 2x2 block of cells does not. Calibrated on the stored before/after pairs:
@@ -69,7 +72,9 @@ class Candidate:
     seen: int = 0  # later frames that did not confirm it yet
     kind: str = "pad"  # "pad": a pee-like step at the pad; "floor": a dark blob outside it
     floor_peak: float = 0.0
-    before_norm: list[float] | None = None  # normalised frame before it (floor candidates)
+    before_norm: list[float] | None = None  # normalised frame before it
+    before_brightness: float | None = None
+    lasting: bool = False  # confirmed by a lasting change, not by a frame like the candidate one
 
 
 def _pixels(jpeg: bytes) -> list[float]:
@@ -164,6 +169,29 @@ def _block_darkening(prev: list[float], now: list[float], cell: int) -> float:
 def _near(a: int, b: int, reach: int = 3) -> bool:
     (ra, ca), (rb, cb) = divmod(a, SIZE), divmod(b, SIZE)
     return abs(ra - rb) <= reach and abs(ca - cb) <= reach
+
+
+def floor_blob(before_jpeg: bytes, after_jpeg: bytes) -> float | None:
+    """Peak of a new dark blob on the floor or tray rim between two visit frames, else None.
+
+    A second opinion on Gemini's "no poop" (2026-11-05 06:13: the poop was in the photo, Gemini
+    missed it). Same rule as a floor candidate. On the 55 stored visits it fires for the poops
+    beside the tray (1.19, 1.67, 3.45) and once without a poop (1.03). It cannot see a poop ON the
+    pad: there a pee darkens as much (up to 3.7).
+    """
+    try:
+        before = _normalise(_pixels(before_jpeg))
+        after = _normalise(_pixels(after_jpeg))
+    except ValueError as exc:
+        log.warning("watch: cannot compare the visit frames: %s", exc)
+        return None
+    peak, floor_dark, _ = _floor_peak(before, after)
+    blob = (
+        peak >= FLOOR_PEAK_MIN
+        and floor_dark <= FLOOR_CTRL_MAX
+        and peak >= FLOOR_RATIO * max(floor_dark, 0.02)
+    )
+    return round(peak, 2) if blob else None
 
 
 @dataclass
@@ -273,7 +301,7 @@ class PadWatch:
             jump_now = self._prev is not None and abs(brightness - self._prev[1]) >= LIGHT_JUMP
             self._follow_poops(norm, jump_now)
         if self._pending is not None:
-            confirmed = self._resolve_pending(norm, brightness, now)
+            confirmed = self._resolve_pending(norm, brightness, now, crop_jpeg)
             self._prev = (norm, brightness, crop_jpeg, now)
             return confirmed
         if self._prev is not None:
@@ -322,6 +350,7 @@ class PadWatch:
                     kind="floor" if floor else "pad",
                     floor_peak=peak,
                     before_norm=prev_norm,
+                    before_brightness=prev_brightness,
                 )
                 if floor:
                     log.info("watch: dark blob outside the pad (peak %.2f, floor %.3f)", peak,
@@ -336,7 +365,7 @@ class PadWatch:
         return None
 
     def _resolve_pending(
-        self, norm: list[float], brightness: float, now: datetime
+        self, norm: list[float], brightness: float, now: datetime, crop_jpeg: bytes
     ) -> Candidate | None:
         pending, row = self._pending, self._pending_row
         assert pending is not None and row is not None
@@ -355,6 +384,11 @@ class PadWatch:
                 _mean_abs(norm, pending.norm, _PAD) < CONFIRM_MAX
                 and abs(brightness - pending.brightness) < LIGHT_JUMP
             )
+            if not same and self._lasting(pending, norm, brightness):
+                # the candidate frame still had her in it (2026-11-07 08:52: Frigate did not see
+                # her, no later frame matched it): judge this clear frame instead
+                pending.after_jpeg, pending.lasting, same = crop_jpeg, True, True
+                row["kind"] = "pad_lasting"
         expired = now - pending.at > timedelta(seconds=PENDING_TTL_S)
         if same:
             row["confirmed"] = True
@@ -368,6 +402,19 @@ class PadWatch:
             self._pending = self._pending_row = None
             log.info("watch: candidate not confirmed, dropped")
         return None
+
+    @staticmethod
+    def _lasting(pending: Candidate, norm: list[float], brightness: float) -> bool:
+        """The pad still differs from the frame BEFORE the candidate, with a quiet floor and no
+        light change: something lasting happened at the pad (a pee), whatever the candidate frame
+        looked like."""
+        if pending.before_norm is None or pending.before_brightness is None:
+            return False
+        return (
+            _mean_abs(norm, pending.before_norm, _PAD) >= LASTING_MIN
+            and _mean_abs(norm, pending.before_norm, _CONTROL) <= CTRL_MAX
+            and abs(brightness - pending.before_brightness) < LIGHT_JUMP
+        )
 
     def _write(self, row: dict) -> None:
         if self._log_path is None:

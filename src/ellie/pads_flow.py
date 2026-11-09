@@ -25,6 +25,9 @@ from ellie.state import local_text
 from ellie.visits import iso
 
 log = logging.getLogger(__name__)
+PRESENCE_RETAKES = 3  # occluded after frames taken again before the owner is asked
+RETAKE_CLEAR_S = 60  # the tray must be clear this long before a retake
+FOUND_POOP_WINDOW = timedelta(minutes=15)  # a poop cleared this long before a cleanup explains it
 PADS_AVERAGED = 5  # finished pads in the "pees per pad" average
 PAD_REASONS = {
     "no_reference": "faltou a foto de antes do tabuleiro",
@@ -64,31 +67,86 @@ class PadsMixin:
         """Newest first. `pees` is how many pees the pad took until the next (not undone) change.
 
         Derived from the visits, not stored: an owner correction later also corrects the average.
-        The current pad has no end yet (`pees_since` says how many it has taken so far).
+        The current pad has no end yet (`pees_since` says how many it has taken so far). `days`
+        is how long the pad was in use; `overflow_pee` is the number of the first pee that went
+        outside the pad (pee_v4, ADR-0017), None when none did.
         """
         history, newer_at = [], None
+        now = iso(self._clock())
         for c in self.store.pad_changes(10):
             counted = c["undone_at"] is None
-            pees = self.store.pees_between(c["at"], newer_at) if counted and newer_at else None
-            history.append(
-                {
-                    "id": c["id"],
-                    "at": c["at"],
-                    "source": c["source"],
-                    "undone_at": c["undone_at"],
-                    "pees": pees,
-                }
-            )
+            entry = {
+                "id": c["id"],
+                "at": c["at"],
+                "source": c["source"],
+                "undone_at": c["undone_at"],
+                "pees": None,
+                "days": None,
+                "pees_per_day": None,
+                "overflow_pee": None,
+            }
             if counted:
+                pees = self.store.pees_list_between(c["at"], newer_at)
+                end = newer_at or now
+                days = (
+                    datetime.fromisoformat(end) - datetime.fromisoformat(c["at"])
+                ).total_seconds()
+                days /= 86400
+                entry["days"] = round(days, 1)
+                entry["overflow_pee"] = next(
+                    (n for n, v in enumerate(pees, 1) if v["pee_where"] in ("off_pad", "both")),
+                    None,
+                )
+                if newer_at:  # finished: the pad's totals are final
+                    entry["pees"] = len(pees)
+                    entry["pees_per_day"] = round(len(pees) / days, 1) if days >= 0.1 else None
                 newer_at = c["at"]
+            history.append(entry)
         return history
 
-    @staticmethod
-    def _pad_averages(history: list[dict[str, Any]]) -> dict[str, Any]:
-        """Average pees of the last `PADS_AVERAGED` finished pads, once at least two exist."""
-        finished = [h["pees"] for h in history if h["pees"] is not None][:PADS_AVERAGED]
-        average = round(sum(finished) / len(finished), 1) if len(finished) >= 2 else None
-        return {"avg_pees_per_pad": average, "pads_counted": len(finished)}
+    def _pad_averages(self, history: list[dict[str, Any]]) -> dict[str, Any]:
+        """Averages of the last `PADS_AVERAGED` finished pads (once at least two exist) and the
+        pads used in the last 30 days (undone changes do not count)."""
+        finished = [h for h in history if h["pees"] is not None][:PADS_AVERAGED]
+        enough = len(finished) >= 2
+
+        def mean(values: list[float]) -> float | None:
+            return round(sum(values) / len(values), 1) if enough and values else None
+
+        days = mean([h["days"] for h in finished])
+        overflows = [h["overflow_pee"] for h in history if h["overflow_pee"] is not None]
+        since = iso(self._clock() - timedelta(days=30))
+        return {
+            "avg_pees_per_pad": mean([h["pees"] for h in finished]),
+            "pads_counted": len(finished),
+            "avg_days_per_pad": days,
+            "pads_per_month": round(30 / days, 1) if days else None,
+            "pads_last_30d": sum(
+                1 for c in self.store.pad_changes_since(since) if c["undone_at"] is None
+            ),
+            "overflow_pees": overflows,  # first pee outside the pad, per pad that overflowed
+        }
+
+    async def _pad_full_if_outside(self, visit: dict) -> None:
+        """A counted pee outside the pad: the pad is full (ADR-0017). Once per visit."""
+        if (
+            visit["final_outcome"] != "pee"
+            or visit["pee_where"] not in ("off_pad", "both")
+            or visit["id"] in self._pad_full_sent
+        ):
+            return
+        self._pad_full_sent.add(visit["id"])
+        change = self.store.current_pad_change()
+        after = self.evidence.visit_dir(visit["id"]) / "after.jpg"
+        payload = {
+            "visit_id": visit["id"],
+            "at": visit["started_at"],
+            "pees_since": self.store.pees_since(change["at"]) if change else None,
+            "image": self.evidence.local_url(after) if after.exists() else None,
+            "reason": visit["reason"],
+        }
+        log.info("visit %s: pee outside the pad, the pad is full", visit["id"])
+        await self._publish("ellie/pad/full", json.dumps(payload, ensure_ascii=False), False)
 
     def pad_photo(self) -> tuple[Path | None, str | None]:
         """Photo of the current pad change and its time.
@@ -181,6 +239,9 @@ class PadsMixin:
             result = await analyser.analyse_pad(before_path.read_bytes(), after_path.read_bytes())
         except AnalyserError as exc:
             return await self._presence_unknown(presence_id, self._reason_for(str(exc)))
+        if result.image_quality == "occluded" and self._retake_presence(presence_id):
+            return  # stays ANALYSING: a new after frame is taken once the tray is clear
+        self._presence_retakes.pop(presence_id, None)
         outcome = decide_pad_change(result, self.cfg["confidence_threshold"])
         decided = outcome in ("replaced", "not_replaced")
         self.store.update_presence(
@@ -206,9 +267,78 @@ class PadsMixin:
             )
         elif outcome != "not_replaced":
             await self._request_pad_review(presence)
+        if result.poop_removed:
+            await self._found_poop(presence)
         if outcome == "not_replaced":  # unsure: wait for the owner (a new pad fakes a "new mark")
             await self._promote_if_eliminated(presence, analyser)
         await self.publish_state()
+
+    def _retake_presence(self, presence_id: str) -> bool:
+        """An occluded frame (someone still at the tray): take the after frame again later
+        instead of asking the owner (2026-11-09 13:08 and 13:10). False when the retakes are used."""
+        done = self._presence_retakes.get(presence_id, 0)
+        if done >= PRESENCE_RETAKES:
+            self._presence_retakes.pop(presence_id, None)
+            return False
+        self._presence_retakes[presence_id] = done + 1
+        after = self.evidence.presence_dir(presence_id) / "after.jpg"
+        if after.exists():
+            self.reference.discard(after.read_bytes())  # never the "before" of what comes next
+        log.info("presence %s: occluded, taking the after frame again when the tray is clear "
+                 "(%s of %s)", presence_id, done + 1, PRESENCE_RETAKES)  # fmt: skip
+        return True
+
+    def _due_retakes(self, now: datetime) -> list[str]:
+        """Presences waiting for a new after frame, once the tray has been clear a while."""
+        if not self._presence_retakes or self.tracker.active is not None:
+            return []
+        if self.presence.present or self.tracker.clear_for(now) < RETAKE_CLEAR_S:
+            return []
+        return [p for p in self._presence_retakes if p not in self._inflight]
+
+    async def _found_poop(self, presence: dict) -> None:
+        """The person removed a poop the system never counted: count it now (cleared already).
+
+        Since 3.5.0 every "poop removed" answer matched a poop that was still open (2026-11-07
+        09:22, 11-08 12:23), so one with no open poop is a poop Frigate or Gemini missed. The time
+        is when the cleanup started (the poop came earlier); the visit lands in the review list.
+        """
+        since = iso(datetime.fromisoformat(presence["started_at"]) - FOUND_POOP_WINDOW)
+        if self._poop_explained(since):
+            return
+        directory = self.evidence.presence_dir(presence["id"])
+        stamp = datetime.fromisoformat(presence["started_at"]).astimezone(LOCAL_TZ)
+        visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        while self.store.get_visit(visit_id):
+            stamp += timedelta(seconds=1)
+            visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
+        self.store.insert_visit(
+            {
+                "id": visit_id,
+                "source": "auto",
+                "started_at": presence["started_at"],
+                "ended_at": presence["ended_at"],
+                "entries": 1,
+                "person_present": True,
+                "frigate_event_ids": [],
+                "state": "DECIDED",
+                "auto_outcome": None,
+                "final_outcome": "no_pee",
+                "auto_poop": "poop",
+                "final_poop": "poop",
+                "poop_observed": "none",
+                "poop_cleared_at": presence["ended_at"],
+                "poop_cleared_by": "owner",
+                "reason": "cocô achado na limpeza (aconteceu antes desta hora)",
+                "needs_review": True,
+            }
+        )
+        target = self.evidence.visit_dir(visit_id)
+        for name in ("before.jpg", "after.jpg"):
+            if (directory / name).exists():
+                self.evidence.write(target / name, (directory / name).read_bytes())
+        log.info("presence %s removed a poop nobody counted: visit %s", presence["id"], visit_id)
+        await self._visit_decided(visit_id, None)
 
     async def _promote_if_eliminated(self, presence: dict, analyser) -> None:
         """If the "person" left new pee or poop, it was Ellie: record it as a normal visit.
@@ -282,12 +412,14 @@ class PadsMixin:
             auto_outcome=outcome,
             final_outcome=outcome if decided else None,
             poop_observed=result.poop,
+            pee_where=result.pee_where,
             reason=result.reason,
             needs_review=(not decided) or bool(self.cfg["validation_mode"]),
             deciding_analyser=analyser.id,
             **self._poop_fields(result),
         )
         promoted = self.store.get_visit(visit_id)
+        await self._pad_full_if_outside(promoted)
         if promoted["final_poop"] == "poop":
             self._follow_poop(promoted)
         log.info(
