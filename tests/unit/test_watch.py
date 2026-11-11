@@ -6,7 +6,17 @@ from pathlib import Path
 
 from PIL import Image
 
-from ellie.watch import LIGHT_JUMP, PAD_BOX, PENDING_TTL_S, PadWatch, floor_blob
+from ellie.watch import (
+    LIGHT_JUMP,
+    PAD_BLOCK_MIN,
+    PAD_BOX,
+    PENDING_TTL_S,
+    PadWatch,
+    _normalise,
+    _pixels,
+    floor_blob,
+    pad_dark_block,
+)
 
 START = datetime(2026, 11, 3, 14, 0, tzinfo=UTC)
 
@@ -296,3 +306,76 @@ def test_floor_blob_sees_the_poop_gemini_missed_and_nothing_on_a_quiet_floor() -
     assert floor_blob(before, before) is None
     assert floor_blob(frame(), frame(pad=60)) is None  # a pee on the pad is not a floor blob
     assert floor_blob(b"not a jpeg", before) is None
+
+
+# --- daylight on the pad and a poop on the pad (2026-11-11) ---
+
+
+def _pair(name: str) -> tuple[bytes, bytes]:
+    folder = FIXTURES / name
+    return (folder / "before.jpg").read_bytes(), (folder / "after.jpg").read_bytes()
+
+
+def _block(before: bytes, after: bytes) -> float:
+    return pad_dark_block(_normalise(_pixels(before)), _normalise(_pixels(after)))
+
+
+def test_the_pad_dark_block_tells_a_pee_or_poop_from_daylight() -> None:
+    assert _block(*_pair("daylight_1110")) < PAD_BLOCK_MIN  # 2026-11-10 12:07, false watch visit
+    assert _block(*_pair("pee_watch_1104")) >= PAD_BLOCK_MIN  # 2026-11-04 06:58, watch caught it
+    assert _block(*_pair("poop_pad_1109")) >= PAD_BLOCK_MIN  # 2026-11-09 19:20, poop on the pad
+
+
+def test_daylight_on_the_pad_is_not_confirmed() -> None:
+    """2026-11-10 09:05-12:07: the sun changed the pad's tone and the change stayed."""
+    w, clock = watch()
+    before, after = _pair("daylight_1110")
+    minute(w, clock, before)
+    for _ in range(6):
+        assert minute(w, clock, after) is None
+    assert w.confirmed_total == 0
+
+
+def test_the_real_pee_the_watch_caught_is_still_confirmed() -> None:
+    w, clock = watch()
+    before, after = _pair("pee_watch_1104")
+    minute(w, clock, before)
+    assert minute(w, clock, after) is None  # candidate
+    assert minute(w, clock, after) is not None
+
+
+def pad_poop(jpeg: bytes, size: int = 12, level: int = 20) -> bytes:
+    """A small dark lump on the pad (a poop), not the big pee patch."""
+    img = Image.open(io.BytesIO(jpeg))
+    px = img.load()
+    x1, y1, x2, y2 = PAD_BOX
+    cx, cy = int((x1 + x2) / 2 * img.width), int((y1 + y2) / 2 * img.height)
+    for y in range(cy, cy + size):
+        for x in range(cx, cx + size):
+            px[x, y] = level
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def test_a_floor_candidate_that_was_her_body_confirms_the_poop_she_left_on_the_pad() -> None:
+    """2026-11-11 07:48: Frigate did not see her; her body made a floor candidate, the blob left
+    with her and the candidate was dropped, but she had pooped on the pad."""
+    w, clock = watch()
+    clean = frame()
+    minute(w, clock, clean)
+    assert minute(w, clock, blob(clean)) is None
+    assert w.last_row["kind"] == "floor"
+    found = minute(w, clock, pad_poop(clean))
+    assert found is not None and found.kind == "pad" and found.lasting
+    assert found.before_jpeg == clean and found.after_jpeg == pad_poop(clean)
+
+
+def test_a_floor_candidate_that_leaves_nothing_on_the_pad_is_still_dropped() -> None:
+    w, clock = watch()
+    clean = frame()
+    minute(w, clock, clean)
+    minute(w, clock, blob(clean))
+    for _ in range(PENDING_TTL_S // 60 + 1):
+        assert minute(w, clock, clean) is None
+    assert w.confirmed_total == 0

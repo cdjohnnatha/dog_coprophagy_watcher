@@ -157,3 +157,30 @@ async def test_a_lasting_change_right_after_a_pad_change_is_ignored(rig):
         await minute(rig, frame())
     await _her_then_a_stain(rig)
     assert auto_visits(rig) == [] and rig.analyser.calls == []
+
+
+def pad_poop(jpeg: bytes, size: int = 12, level: int = 20) -> bytes:
+    img = Image.open(io.BytesIO(jpeg))
+    px = img.load()
+    x1, y1, x2, y2 = PAD_BOX
+    cx, cy = int((x1 + x2) / 2 * img.width), int((y1 + y2) / 2 * img.height)
+    for y in range(cy, cy + size):
+        for x in range(cx, cx + size):
+            px[x, y] = level
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+async def test_her_body_as_a_floor_candidate_then_a_poop_on_the_pad_opens_a_pad_visit(rig):
+    """2026-11-11 07:48: no Frigate event, the floor candidate was her, the poop stayed on the pad."""
+    clean = frame()
+    for _ in range(2):
+        await minute(rig, clean)
+    await minute(rig, floor_poop(clean))  # her body beside the tray: a floor candidate
+    await minute(rig, pad_poop(clean))  # she left, a poop on the pad stays
+    (visit,) = auto_visits(rig)
+    directory = rig.evidence.visit_dir(visit["id"])
+    assert (directory / "before.jpg").read_bytes() == clean
+    assert (directory / "after.jpg").read_bytes() == pad_poop(clean)
+    assert len(rig.analyser.calls) == 1

@@ -41,6 +41,13 @@ PENDING_TTL_S = 300  # a candidate waits this long for a frame that confirms it
 # A later frame whose pad still differs this much from the frame BEFORE the candidate confirms it
 # too (the pee stays, she does not). Pees on a stained pad step 0.12-0.21, quiet minutes ~0.03.
 LASTING_MIN = 0.10
+# A pee or a poop leaves a NEW DARK patch on the pad; daylight moving over the white pad shifts its
+# whole tone instead (2026-11-10 09:05-12:07: 6 watch visits, 16 lasting confirms, none real). So a
+# watch confirm also needs a 2x2 block of pad cells that darkened this much against the frame
+# before the candidate. Measured on the stored visits (before/after): false watch visits 0.10-0.82,
+# the watch's real pee (2026-11-04 06:58) 1.61, Frigate pees 0.83-3.2 (28 of 31 at 0.9 or more),
+# poops on the pad 2.4-4.3.
+PAD_BLOCK_MIN = 0.9
 # Poop on the floor or the tray rim (2026-11-03 10:00, 11-04 07:28, 11-05 06:13): a small DARK blob
 # appears outside the pad. It is a few pixels wide, so the mean over the floor hides it; the peak of
 # the darkening over a 2x2 block of cells does not. Calibrated on the stored before/after pairs:
@@ -164,6 +171,22 @@ def _block_darkening(prev: list[float], now: list[float], cell: int) -> float:
             idx = (r * SIZE + c, r * SIZE + c + 1, (r + 1) * SIZE + c, (r + 1) * SIZE + c + 1)
             best = max(best, sum(max(0.0, prev[i] - now[i]) for i in idx) / 4)
     return best
+
+
+# 2x2 blocks of cells all on the pad
+_PAD_BLOCKS = [
+    (r * SIZE + c, r * SIZE + c + 1, (r + 1) * SIZE + c, (r + 1) * SIZE + c + 1)
+    for r in range(SIZE - 1)
+    for c in range(SIZE - 1)
+    if _PAD_SET.issuperset((r * SIZE + c, r * SIZE + c + 1, (r + 1) * SIZE + c,
+                            (r + 1) * SIZE + c + 1))
+]  # fmt: skip
+
+
+def pad_dark_block(prev: list[float], now: list[float]) -> float:
+    """Darkening of `now` against `prev` over the darkest 2x2 block of pad cells."""
+    dark = [max(0.0, p - n) for p, n in zip(prev, now, strict=True)]
+    return max((sum(dark[i] for i in block) / 4 for block in _PAD_BLOCKS), default=0.0)
 
 
 def _near(a: int, b: int, reach: int = 3) -> bool:
@@ -379,10 +402,16 @@ class PadWatch:
                 and _mean_abs(norm, pending.norm, _CONTROL) < CONFIRM_MAX
                 and abs(brightness - pending.brightness) < LIGHT_JUMP
             )
+            if not same and self._lasting(pending, norm, brightness, whole_pad=False):
+                # the "blob" was her body and it left with her, but she left something on the
+                # pad (2026-11-11 07:48: a poop on the pad, Frigate did not see her): a pad visit
+                pending.after_jpeg, pending.lasting, same = crop_jpeg, True, True
+                pending.kind, row["kind"] = "pad", "pad_lasting"
         else:
             same = (
                 _mean_abs(norm, pending.norm, _PAD) < CONFIRM_MAX
                 and abs(brightness - pending.brightness) < LIGHT_JUMP
+                and self._darker_pad(pending, norm)
             )
             if not same and self._lasting(pending, norm, brightness):
                 # the candidate frame still had her in it (2026-11-07 08:52: Frigate did not see
@@ -404,16 +433,29 @@ class PadWatch:
         return None
 
     @staticmethod
-    def _lasting(pending: Candidate, norm: list[float], brightness: float) -> bool:
+    def _darker_pad(pending: Candidate, norm: list[float]) -> bool:
+        """A new dark patch on the pad against the frame before the candidate (PAD_BLOCK_MIN)."""
+        if pending.before_norm is None:
+            return True  # nothing to compare with: keep the older rule
+        return pad_dark_block(pending.before_norm, norm) >= PAD_BLOCK_MIN
+
+    @classmethod
+    def _lasting(
+        cls, pending: Candidate, norm: list[float], brightness: float, whole_pad: bool = True
+    ) -> bool:
         """The pad still differs from the frame BEFORE the candidate, with a quiet floor and no
-        light change: something lasting happened at the pad (a pee), whatever the candidate frame
-        looked like."""
+        light change, and a new dark patch is on it: something lasting happened at the pad (a pee
+        or a poop), whatever the candidate frame looked like.
+
+        `whole_pad=False` drops the mean over the pad: a small poop is a few cells and hardly moves
+        the mean, the dark patch alone tells it (used for a floor candidate that was her body)."""
         if pending.before_norm is None or pending.before_brightness is None:
             return False
         return (
-            _mean_abs(norm, pending.before_norm, _PAD) >= LASTING_MIN
+            (not whole_pad or _mean_abs(norm, pending.before_norm, _PAD) >= LASTING_MIN)
             and _mean_abs(norm, pending.before_norm, _CONTROL) <= CTRL_MAX
             and abs(brightness - pending.before_brightness) < LIGHT_JUMP
+            and cls._darker_pad(pending, norm)
         )
 
     def _write(self, row: dict) -> None:

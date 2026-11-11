@@ -24,6 +24,7 @@ from ellie.frames import FrameError, ReferenceKeeper
 from ellie.pads import PresenceTracker
 from ellie.pads_flow import FOUND_POOP_WINDOW, PadsMixin
 from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
+from ellie.small_person import SmallPersonFilter
 from ellie.state import build_state, local_text
 from ellie.store import Store
 from ellie.visits import Action, VisitTracker, iso
@@ -134,6 +135,9 @@ class Service(PadsMixin):
         self.tracker.id_taken = lambda i: self.store.get_visit(i) is not None
         self._download_clip = download_clip
         self.presence = presence or PresenceTracker()
+        # tray_area counts as Frigate sends them, and the persons that are really her (ADR-0019)
+        self.small_person = SmallPersonFilter(camera)
+        self._raw_area = {"dog": 0, "person": 0}
         self.presence.id_taken = lambda i: self.store.get_presence(i) is not None
         self.commands: dict[str, Callable[[dict], Awaitable[None]]] = {
             "label": self._cmd_label,
@@ -171,22 +175,28 @@ class Service(PadsMixin):
         presence_actions = self._sync_presence(now)
         if topic == "frigate/pad_zone/dog":
             actions = self._count(payload, lambda n: self.tracker.on_pad_dog(n, now))
-        elif topic == "frigate/tray_area/dog":
-            actions = self._count(payload, lambda n: self.tracker.on_tray_dog(n, now))
-            self._count(payload, lambda n: self.presence.on_dog_area(n, now))
-        elif topic == "frigate/tray_area/person":
-            actions = self._count(payload, lambda n: self.tracker.on_tray_person(n, now))
-            presence_actions += self._count(payload, lambda n: self.presence.on_person(n, now))
+        elif topic in ("frigate/tray_area/dog", "frigate/tray_area/person"):
+            kind = topic.rsplit("/", 1)[1]
+            raw = self._count(payload, lambda n: [n])
+            if raw:
+                self._raw_area[kind] = max(raw[0], 0)
+                actions, more = self._area_counts(now, (kind,))
+                presence_actions += more
         elif topic == "frigate/tray_pad/dog":
             actions = self._count(payload, lambda n: self.tracker.on_tray_pad_dog(n, now))
         elif topic == "frigate/events":
+            if self.small_person.on_event(payload, now):
+                actions, more = self._area_counts(now, ("dog", "person"))
+                presence_actions += more
             event_id = self._dog_event_id(payload)
-            actions = self.tracker.on_event(event_id, now) if event_id else []
+            actions += self.tracker.on_event(event_id, now) if event_id else []
         elif topic == "frigate/available":
             actions = self.tracker.on_frigate_available(
                 payload.decode(errors="replace").strip() == "online", now
             )
             self.presence.reset(now)
+            self.small_person.reset()
+            self._raw_area = {"dog": 0, "person": 0}  # stale after an outage, like presence's
         elif topic.startswith("ellie/set/"):
             await self.on_set(
                 topic.removeprefix("ellie/set/"), payload.decode(errors="replace").strip()
@@ -1049,10 +1059,29 @@ class Service(PadsMixin):
             return []
         return handler(count)
 
+    def _area_counts(self, now: datetime, kinds: tuple[str, ...]) -> tuple[list[Action], list[Any]]:
+        """Pass tray_area counts on, with the persons that are her moved to the dog count."""
+        her = min(self.small_person.count, self._raw_area["person"])
+        counts = {"dog": self._raw_area["dog"] + her, "person": self._raw_area["person"] - her}
+        actions: list[Action] = []
+        presence: list[Any] = []
+        # persons first: a visit that starts on the dog count must not see her as a person
+        if "person" in kinds:
+            actions += self.tracker.on_tray_person(counts["person"], now)
+            presence += self.presence.on_person(counts["person"], now)
+        if "dog" in kinds:
+            actions += self.tracker.on_tray_dog(counts["dog"], now)
+            presence += self.presence.on_dog_area(counts["dog"], now)
+        return actions, presence
+
     def _dog_event_id(self, payload: bytes) -> str | None:
         try:
             after = (json.loads(payload) or {}).get("after") or {}
-            if after.get("camera") != self.camera or after.get("label") != "dog":
+            if after.get("camera") != self.camera:
+                return None
+            if after.get("label") != "dog" and not (
+                after.get("label") == "person" and self.small_person.is_ellie(str(after.get("id")))
+            ):
                 return None
             if not {"pad_zone", "tray_area"} & set(after.get("entered_zones") or []):
                 return None
