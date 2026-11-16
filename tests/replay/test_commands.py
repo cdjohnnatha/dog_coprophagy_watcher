@@ -108,7 +108,11 @@ async def test_manual_pee_rejects_the_future_and_bad_times_and_keeps_ids_unique(
     await command(rig, "manual_pee", at="banana")
     assert visits(rig) == []
     await command(rig, "manual_pee", at="2026-10-29T10:00:00")
-    await command(rig, "manual_pee", at="2026-10-29T10:00:00")
+    await command(rig, "manual_pee", at="2026-10-29T10:00:00")  # the same pee twice (ADR-0020)
+    await command(rig, "manual_pee", at="2026-10-29T10:20:00")  # Ellie never pees 20 min apart
+    ids = [v["id"] for v in visits(rig)]
+    assert len(ids) == 1 and last_state(rig)["pee_today"] == 1
+    await command(rig, "manual_pee", at="2026-10-29T11:00:00")
     ids = [v["id"] for v in visits(rig)]
     assert len(ids) == len(set(ids)) == 2 and last_state(rig)["pee_today"] == 2
 

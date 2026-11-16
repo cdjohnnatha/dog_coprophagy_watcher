@@ -217,6 +217,80 @@ def floor_blob(before_jpeg: bytes, after_jpeg: bytes) -> float | None:
     return round(peak, 2) if blob else None
 
 
+# Second opinion on Gemini's "no pee" (ADR-0020): the share of pad cells that got clearly darker.
+# The darkest 2x2 block (PAD_BLOCK_MIN) misses a pee that only widens an old stain (2026-11-13
+# 23:58: block 0.76), so this counts AREA on a finer grid. Measured on the stored Frigate visits
+# without poop: pees 0.9-27 % (2026-11-13 23:58 and 2026-11-10 20:14, both missed by Gemini, at
+# 2.3 %), Gemini's correct "no pee" answers at most 1.2 %. Watch visits (no Frigate) reach 9 % in
+# daylight, so the rule is only used for visits Frigate reported.
+AREA_SIZE = 96
+AREA_DARK = 0.5  # normalised darkening that marks a pad cell as newly stained
+PEE_AREA_MIN = 0.02  # share of pad cells
+PEE_FLOOR_MAX = 0.06  # mean floor darkening: more is light or a person in the frame
+
+
+def _area_regions() -> tuple[list[int], list[int]]:
+    x1, y1, x2, y2 = PAD_BOX
+    m = CONTROL_MARGIN
+    pad, control = [], []
+    for row in range(AREA_SIZE):
+        for col in range(AREA_SIZE):
+            fx, fy = (col + 0.5) / AREA_SIZE, (row + 0.5) / AREA_SIZE
+            if x1 <= fx <= x2 and y1 <= fy <= y2:
+                pad.append(row * AREA_SIZE + col)
+            elif not (x1 - m <= fx <= x2 + m and y1 - m <= fy <= y2 + m):
+                control.append(row * AREA_SIZE + col)
+    return pad, control
+
+
+_AREA_PAD, _AREA_CONTROL = _area_regions()
+
+
+def _area_pixels(jpeg: bytes) -> list[float]:
+    try:
+        img = Image.open(io.BytesIO(jpeg))
+        img.draft("L", (AREA_SIZE * 2, AREA_SIZE * 2))
+        img = img.convert("L").resize((AREA_SIZE, AREA_SIZE))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"not a valid image: {exc!r}") from exc
+    flat = img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()
+    px = [float(p) for p in flat]
+    floor = [px[i] for i in _AREA_CONTROL]
+    mean = sum(floor) / len(floor)
+    std = (sum((p - mean) ** 2 for p in floor) / len(floor)) ** 0.5 or 1.0
+    return [(p - mean) / std for p in px]
+
+
+def _size(jpeg: bytes) -> tuple[int, int]:
+    try:
+        return Image.open(io.BytesIO(jpeg)).size
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"not a valid image: {exc!r}") from exc
+
+
+def new_stain_area(before_jpeg: bytes, after_jpeg: bytes) -> tuple[float, float] | None:
+    """(share of pad cells that got darker by AREA_DARK, mean floor darkening), None if unusable."""
+    try:
+        if _size(before_jpeg) != _size(after_jpeg):  # e.g. one frame from the Frigate fallback
+            return None
+        before, after = _area_pixels(before_jpeg), _area_pixels(after_jpeg)
+    except ValueError as exc:
+        log.warning("watch: cannot compare the visit frames: %s", exc)
+        return None
+    area = sum(1 for i in _AREA_PAD if before[i] - after[i] > AREA_DARK) / len(_AREA_PAD)
+    floor = sum(max(0.0, before[i] - after[i]) for i in _AREA_CONTROL) / len(_AREA_CONTROL)
+    return area, floor
+
+
+def pee_stain(before_jpeg: bytes, after_jpeg: bytes) -> float | None:
+    """The new stained share of the pad when it says "a pee", else None."""
+    measured = new_stain_area(before_jpeg, after_jpeg)
+    if measured is None:
+        return None
+    area, floor = measured
+    return round(area, 3) if area >= PEE_AREA_MIN and floor <= PEE_FLOOR_MAX else None
+
+
 @dataclass
 class PoopTrack:
     """One counted poop the watch keeps an eye on, until it is gone."""

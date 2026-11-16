@@ -261,7 +261,7 @@ async def test_reanalysis_that_decides_clears_the_stale_phone_notification(rig):
 async def test_last_pee_photo_follows_last_pee_after_manual_pee(rig):
     put_visit(rig)
     await rig.service.publish_state()
-    await cmd(rig, "manual_pee", at="2026-07-10 20:30:00")
+    await cmd(rig, "manual_pee", at="2026-07-10 20:50:00")  # 50 min after it: not the same pee
     st = last_state(rig)
     assert st["last_pee"]["visit_id"] != "v_20260710_190000"
     assert st["last_pee"]["image"] is None

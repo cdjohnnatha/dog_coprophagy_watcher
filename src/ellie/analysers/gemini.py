@@ -41,6 +41,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "night_mode": {"type": "boolean", "description": "Images are infrared/black-and-white."},
         "pee_where": {"type": "string", "enum": ["none", "on_pad", "off_pad", "both"],
                       "description": "Where the new pee is: on the pad, outside it, or both."},
+        "pad_stains": {"type": "integer", "description": "Separate pee stains on the pad in AFTER, old and new."},
         "reason": {"type": "string", "description": "Short explanation in Brazilian Portuguese, at most 140 characters."},
     },
     "required": [
@@ -134,16 +135,24 @@ class GeminiAnalyser:
         suffix = "" if thinking == "minimal" else f"+{thinking}"
         self.id = f"gemini:{pee_prompt}{suffix}"  # one analyser per prompt/thinking, comparable
         self._pee_prompt = load_prompt(pee_prompt)
+        self._uses_context = "CONTEXT" in self._pee_prompt  # pee_v5 and later
         self._pad_prompt = load_prompt("pad_change_v1")
         self.last_model: str | None = None
         self.last_usage: dict[str, int] = {"in": 0, "out": 0}
 
-    async def analyse(self, before: bytes, after: bytes, during: bytes | None) -> AnalysisResult:
+    async def analyse(
+        self, before: bytes, after: bytes, during: bytes | None, context: str | None = None
+    ) -> AnalysisResult:
         parts = [_text("BEFORE:"), _image(before, "high"), _text("AFTER:"), _image(after, "high")]
+        if context and self._uses_context:
+            parts = [_text(f"CONTEXT: {context}"), *parts]
         if during:
             parts += [_text("DURING:"), _image(during, "low")]
         answer = await self._generate(self._pee_prompt, parts, RESPONSE_SCHEMA)
-        return self._parse(AnalysisResult, answer)
+        result = self._parse(AnalysisResult, answer)
+        if not self._uses_context and result.pad_stains is not None:
+            result = result.model_copy(update={"pad_stains": None})  # only pee_v5 is asked for it
+        return result
 
     async def analyse_pad(self, before: bytes, after: bytes) -> PadChangeResult:
         parts = [_text("BEFORE:"), _image(before, "high"), _text("AFTER:"), _image(after, "high")]

@@ -48,7 +48,7 @@ class ChaosAnalyser:
         if roll < 0.13:
             raise RuntimeError("unexpected")
 
-    async def analyse(self, before, after, during):
+    async def analyse(self, before, after, during, context=None):
         self._maybe_fail()
         return make_result(
             pee=self.rnd.random() < 0.5,

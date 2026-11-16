@@ -57,6 +57,24 @@ async def fetch_frame(
     raise FrameError(error)
 
 
+async def fetch_latest(
+    client: httpx.AsyncClient, frigate_url: str, camera: str, timeout: float = 10.0
+) -> bytes:
+    """Frigate's latest frame of the camera (its detect stream, lower resolution).
+
+    The fallback when go2rtc fails (2026-11-13 17:55-21:07, after a router restart: go2rtc answered
+    500 or timed out for hours while Frigate still detected her at 19:37, ADR-0020).
+    """
+    url = f"{frigate_url}/api/{camera}/latest.jpg"
+    try:
+        resp = await client.get(url, params={"quality": 95}, timeout=timeout)
+    except httpx.HTTPError as exc:
+        raise FrameError(f"Frigate latest frame failed: {exc!r}") from exc
+    if resp.status_code != 200 or not resp.content:
+        raise FrameError(f"Frigate latest frame returned HTTP {resp.status_code}")
+    return resp.content
+
+
 async def fetch_snapshot(
     client: httpx.AsyncClient, frigate_url: str, event_id: str, timeout: float = 10.0
 ) -> bytes | None:

@@ -398,12 +398,14 @@ async def test_an_own_during_frame_replaces_a_missing_frigate_snapshot(tmp_path,
     rig.store.close()
 
 
-async def test_a_person_removing_a_poop_gemini_did_not_see_counts_it(tmp_path, clock):
+async def test_a_person_removing_a_poop_gemini_did_not_see_asks_the_owner(tmp_path, clock):
+    """2026-11-16 01:20: a spreading IR pee stain was read as "poop removed"; ask, never count."""
     rig = build(tmp_path, clock, fetch_frame=_camera([DOG, make_jpeg((60, 40, 20)), make_jpeg()]))
     rig.reference.update(make_jpeg((200, 200, 200)))
     rig.analyser.script(make_result(pee=False, poop="none"))
     rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
     await _poop_then_cleaned(rig)
     (visit,) = rig.store.visits_started_between("2026", "2028")
-    assert visit["final_poop"] == "poop" and visit["poop_cleared_by"] == "owner"
+    assert visit["auto_poop"] == "uncertain" and visit["final_poop"] is None
+    assert visit["poop_cleared_by"] is None
     assert visit["needs_review"] is True

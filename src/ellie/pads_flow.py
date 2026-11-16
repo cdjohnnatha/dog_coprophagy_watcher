@@ -29,6 +29,9 @@ PRESENCE_RETAKES = 3  # occluded after frames taken again before the owner is as
 RETAKE_CLEAR_S = 60  # the tray must be clear this long before a retake
 FOUND_POOP_WINDOW = timedelta(minutes=15)  # a poop cleared this long before a cleanup explains it
 PADS_AVERAGED = 5  # finished pads in the "pees per pad" average
+PAD_CHANGE_MERGE = timedelta(
+    minutes=10
+)  # a second change this close to the current one is the same
 PAD_REASONS = {
     "no_reference": "faltou a foto de antes do tabuleiro",
     "frame_error": "não consegui pegar a imagem da câmera",
@@ -222,13 +225,13 @@ class PadsMixin:
         before_path, after_path = directory / "before.jpg", directory / "after.jpg"
         if not retry:
             try:
-                after = self._crop(await self._fetch_frame())
+                after, fallback = await self._frame()
             except FrameError as exc:
                 log.warning("presence %s: %s", presence_id, exc)
                 return await self._presence_unknown(presence_id, "frame_error")
             self.evidence.write(after_path, after)
             self.reference.update(after)
-            if self.watch is not None:
+            if self.watch is not None and not fallback:
                 self.watch.rebase(after)  # the presence explains what changed at the pad
         if not before_path.exists():
             return await self._presence_unknown(presence_id, "no_reference")
@@ -470,6 +473,17 @@ class PadsMixin:
         visit_id: str | None = None,
         pad_color: str | None = None,
     ) -> str:
+        current = self.store.current_pad_change()
+        merge = (
+            current is not None
+            and source != "manual"  # the owner's own mark ("Troquei agora") is always recorded
+            and abs(datetime.fromisoformat(at) - datetime.fromisoformat(current["at"]))
+            <= PAD_CHANGE_MERGE
+        )
+        if merge:  # two presences of one swap (2026-11-13 18:37:49 and 18:38:35)
+            log.info("pad change at %s is the same as %s, not recorded again", at, current["id"])
+            await self._clear_poops("pad_change", where="on_pad")
+            return current["id"]
         stamp = datetime.fromisoformat(at).astimezone(LOCAL_TZ)
         change_id = f"p_{stamp:%Y%m%d_%H%M%S}"
         while any(c["id"] == change_id for c in self.store.pad_changes(50)):
@@ -552,6 +566,14 @@ class PadsMixin:
         if undone is None:
             log.warning("pad_undo: no pad change to undo")
             return
+        # pees a census found on that "new" pad were the old pad's stains (ADR-0020)
+        for v in self.store.visits_started_between(undone["at"], iso(self._clock())):
+            if v.get("found_by") and v["final_outcome"] == "pee":
+                self.store.update_visit(
+                    v["id"], final_outcome="no_pee", needs_review=False,
+                    reason="xixi achado no tapete desfeito: o tapete não foi trocado",
+                )  # fmt: skip
+                log.info("pad_undo: the found pee %s is not counted any more", v["id"])
         message = {"pad_change_id": undone["id"], "at": undone["at"], "source": undone["source"]}
         await self._publish("ellie/pad/changed", json.dumps({**message, "undone": True}), False)
         await self.publish_state()

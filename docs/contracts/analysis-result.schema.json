@@ -71,6 +71,10 @@
         "both"
       ],
       "description": "Where the new pee is (prompt pee_v4): on the pad, outside it (the pad is full), or both. Optional: older prompts leave it out."
+    },
+    "pad_stains": {
+      "type": "integer",
+      "description": "Separate pee stains on the pad in AFTER, old and new (prompt pee_v5, ADR-0020 census; the app clamps it to 0-30). Stains that touch count as one, so it is a lower bound of the pees on the pad. Optional: older prompts leave it out."
     }
   }
 }

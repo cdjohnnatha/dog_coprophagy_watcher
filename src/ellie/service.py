@@ -17,6 +17,7 @@ from typing import Any
 
 from ellie import discovery
 from ellie.analysers.base import Analyser, AnalyserError
+from ellie.census import FOUND_PEE_REASON, found_pee_times, is_found_pee, missing_pees
 from ellie.counting import LOCAL_TZ, Counting, local_date
 from ellie.decide import decide_pad_change, decide_poop, decide_visit
 from ellie.evidence import Evidence
@@ -28,7 +29,7 @@ from ellie.small_person import SmallPersonFilter
 from ellie.state import build_state, local_text
 from ellie.store import Store
 from ellie.visits import Action, VisitTracker, iso
-from ellie.watch import Candidate, PadWatch, floor_blob
+from ellie.watch import Candidate, PadWatch, floor_blob, pee_stain
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,14 @@ REFERENCE_CLEAR_S = 10  # the area must be clear this long before a reference fr
 WATCH_DAILY_CAP = 6  # visits the pad watch may open per local day (worst case about 0.008 EUR)
 LASTING_QUIET = timedelta(minutes=30)  # no activity this long before a lasting-change confirm
 WATCH_EXPLAIN_S = 180  # a visit or presence this close to a candidate already explains it
+# A pee stain spreads for a few minutes while the pad absorbs it (the night minutes after 2026-11-13
+# 03:46 settle within 5 min) and Ellie never pees twice in a short time (shortest gap between two
+# real pees in 45: 84 min). So growth within SPREAD_MIN of a pee is that pee; later it is a new one
+# (ADR-0020). SAME_PEE is the window in which two entries are one and the same pee or poop.
+SPREAD_MIN = timedelta(minutes=15)
+SAME_EVENT = timedelta(minutes=30)
+FOUND_MATCH = timedelta(hours=6)  # a manual pee takes over a found pee of the same pad this close
+CAMERA_ALERT_AFTER = timedelta(minutes=15)  # go2rtc failing this long: tell the owner
 ALERT_EVERY_S = 6 * 3600
 POOP_PRESENT_TIMEOUT_H = 12  # a counted poop nobody cleared stops being "present" after this
 POOP_TRACK_LOOKBACK_DAYS = 2  # after a restart, open poops this recent are followed again
@@ -113,8 +122,11 @@ class Service(PadsMixin):
         download_clip: Callable[[str, str], Awaitable[bool]] | None = None,
         presence: PresenceTracker | None = None,
         watch: PadWatch | None = None,
+        fetch_fallback_frame: Callable[[], Awaitable[bytes]] | None = None,
     ) -> None:
         self.watch = watch
+        self._fetch_fallback = fetch_fallback_frame
+        self._camera_failing_since: datetime | None = None
         self._watch_day: date | None = None
         self._watch_opened = 0
         self.store, self.evidence, self.reference, self.tracker = (
@@ -158,6 +170,8 @@ class Service(PadsMixin):
         self._poop_asked: set[str] = set()  # visits whose poop question was already sent
         self._presence_retakes: dict[str, int] = {}  # occluded presences: retakes done so far
         self._pad_full_sent: set[str] = set()  # visits whose "pad full" notice went out
+        self._census_lock = asyncio.Lock()
+        self._person_checks: dict[str, Any] = {}  # visit id -> pad answer for the person after her
 
     # --- MQTT entry points ---
 
@@ -216,8 +230,10 @@ class Service(PadsMixin):
         now = self._clock()
         if self.tracker.active is None and self.tracker.clear_for(now) >= REFERENCE_CLEAR_S:
             try:
-                crop = self._crop(await self._fetch_frame())
-                confirmed = self.watch.observe(crop) if self.watch is not None else None
+                crop, fallback = await self._frame()
+                # a lower-resolution fallback frame would look like a change to the watch
+                watching = self.watch is not None and not fallback
+                confirmed = self.watch.observe(crop) if watching else None
                 self.reference.update(crop)
                 if confirmed is not None:  # a change Frigate never reported (ADR-0012)
                     await self._open_watch_visit(confirmed)
@@ -342,10 +358,67 @@ class Service(PadsMixin):
             visit_id = f"v_{stamp:%Y%m%d_%H%M%S}"
         return visit_id
 
+    @staticmethod
+    def _closest(visits: list[dict], at: datetime) -> dict | None:
+        return min(
+            visits,
+            key=lambda v: abs((datetime.fromisoformat(v["started_at"]) - at).total_seconds()),
+            default=None,
+        )
+
+    def _counted_near(self, at: datetime, kind: str) -> dict | None:
+        """The closest counted pee (or poop) within SAME_EVENT of `at`: the same event, twice.
+
+        For pees a real one wins over a census pee, so a manual entry next to a real pee is
+        never turned into a second pee by taking over a found one.
+        """
+        near = self.store.visits_started_between(iso(at - SAME_EVENT), iso(at + SAME_EVENT))
+        if kind == "pee":
+            pees = [v for v in near if v["final_outcome"] == "pee"]
+            real = [v for v in pees if not is_found_pee(v)]
+            return self._closest(real or pees, at)
+        return self._closest([v for v in near if v["final_poop"] == "poop"], at)
+
+    def _found_pees_covering(self, at: datetime, census_from: str | None = None) -> list[dict]:
+        """Census pees still counted whose window (found_from .. the census visit) holds `at`."""
+        stamp = iso(at)
+        found = []
+        for v in self.store.visits_started_between(iso(at - FOUND_MATCH), iso(at + FOUND_MATCH)):
+            if not is_found_pee(v) or v["final_outcome"] != "pee":
+                continue
+            census = self.store.get_visit(v["found_by"])
+            window_end = census["started_at"] if census else v["started_at"]
+            if (v["found_from"] or "") <= stamp <= window_end and (
+                census_from is None or window_end >= census_from
+            ):
+                found.append(v)
+        return found
+
+    def _found_pee_for(self, at: datetime) -> dict | None:
+        """The census pee whose window holds `at`, closest first (FOUND_MATCH at most)."""
+        return self._closest(self._found_pees_covering(at), at)
+
     async def _cmd_manual_pee(self, data: dict) -> None:
         """`ellie/cmd/manual_pee`: a pee the system missed, possibly on an earlier day."""
         at = self._manual_time("manual_pee", data)
         if at is None:
+            return
+        same = self._counted_near(at, "pee")
+        if same is not None and not is_found_pee(same):
+            log.warning("manual_pee at %s: the pee of %s is already counted (Ellie never pees "
+                        "twice within %s min), not added", iso(at), same["id"],
+                        int(SAME_EVENT.total_seconds() // 60))  # fmt: skip
+            return
+        found = same if same is not None else self._found_pee_for(at)
+        if found is not None:  # the owner knows the real time of a pee the census added
+            self.store.update_visit(
+                found["id"], started_at=iso(at), ended_at=iso(at), needs_review=False,
+                state="LABELLED", found_by=None, found_from=None,
+                reason="adicionado manualmente (era xixi achado no tapete)",
+            )  # fmt: skip
+            self.store.insert_label(found["id"], "pee", "manual_add", self._by(data), "pee")
+            log.info("manual_pee at %s takes the place of the found pee %s", iso(at), found["id"])
+            await self._visit_decided(found["id"], None)
             return
         visit_id = self._manual_visit_id(at)
         self.store.insert_visit(
@@ -375,6 +448,11 @@ class Service(PadsMixin):
         """
         at = self._manual_time("manual_poop", data)
         if at is None:
+            return
+        same = self._counted_near(at, "poop")
+        if same is not None:
+            log.warning("manual_poop at %s: the poop of %s is already counted, not added",
+                        iso(at), same["id"])  # fmt: skip
             return
         where = data.get("where") if data.get("where") in ("on_pad", "beside_tray") else "none"
         visit_id = self._manual_visit_id(at)
@@ -414,8 +492,11 @@ class Service(PadsMixin):
         # a poop often comes a minute or two after a visit closed, so for the floor only a visit
         # that overlaps the frames themselves explains it (ADR-0012 amendment)
         window = timedelta(seconds=0 if found.kind == "floor" else WATCH_EXPLAIN_S)
+        # a presence never counts a poop, and Ellie seen as a person for 2 s is such a presence
+        # (2026-11-14 09:59): only a visit explains a floor change (ADR-0020)
+        tables = ("visits",) if found.kind == "floor" else ("visits", "presences")
         if self.tracker.active is not None or self.store.activity_between(
-            iso(found.before_at - window), iso(found.at + window)
+            iso(found.before_at - window), iso(found.at + window), tables
         ):
             log.info("watch: a visit or presence already explains the change, no new visit")
             return
@@ -508,6 +589,8 @@ class Service(PadsMixin):
             return
         self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"])
         self.store.update_visit(visit_id, final_outcome=label, needs_review=False, state="LABELLED")
+        if label == "pee" and visit["final_outcome"] != "pee" and not is_found_pee(visit):
+            await self._absorb_found_pee(visit)
         visit = self.store.get_visit(visit_id)
         analyses = self.store.analyses_for(visit_id)
         night = ((analyses[-1]["result"] or {}).get("night_mode")) if analyses else None
@@ -517,6 +600,23 @@ class Service(PadsMixin):
             log.exception("dataset export failed for %s", visit_id)
         await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
         await self._visit_decided(visit_id, None)
+
+    async def _absorb_found_pee(self, visit: dict) -> None:
+        """A visit the owner turned into a pee was one of the stains a census counted as missing:
+        drop that census pee, so one stain stays one pee (ADR-0020)."""
+        at = datetime.fromisoformat(visit["started_at"])
+        found = self._closest(self._found_pees_covering(at, census_from=visit["started_at"]), at)
+        if found is None:
+            return
+        hhmm = (local_text(visit["started_at"]) or "")[11:16]
+        self.store.update_visit(
+            found["id"], final_outcome="no_pee", needs_review=False,
+            reason=f"{FOUND_PEE_REASON}: era a visita das {hhmm}",
+        )  # fmt: skip
+        log.info(
+            "the found pee %s was the pee of %s, not counted any more", found["id"], visit["id"]
+        )
+        await self._visit_decided(found["id"], None)
 
     # --- poop (ADR-0014) ---
 
@@ -640,15 +740,16 @@ class Service(PadsMixin):
                 (directory / "before.jpg").read_bytes(),
                 (directory / "after.jpg").read_bytes(),
                 during.read_bytes() if during.exists() else None,
+                context=self._pee_context(self.store.get_visit(visit_id)),
             )
         except AnalyserError as exc:
             log.warning("reanalyse %s failed: %s", visit_id, exc)
             return
         outcome = decide_visit(result, self.cfg["confidence_threshold"])
         log.info(
-            "reanalyse %s with %s: %s (pee %s %.2f, poop %s %.2f) %s",
+            "reanalyse %s with %s: %s (pee %s %.2f, poop %s %.2f, stains %s) %s",
             visit_id, analyser.id, outcome, result.pee, result.pee_confidence,
-            result.poop, result.poop_confidence, result.reason,
+            result.poop, result.poop_confidence, result.pad_stains, result.reason,
         )  # fmt: skip
         self.store.insert_analysis(
             visit_id, analyser.id, "shadow", result.model_dump(exclude_none=True), outcome,
@@ -706,6 +807,137 @@ class Service(PadsMixin):
                  "asking the owner", visit_id, peak)  # fmt: skip
         return {"auto_poop": "uncertain", "final_poop": None}
 
+    @staticmethod
+    def _before_at(visit: dict) -> datetime:
+        """When the visit's BEFORE frame was taken."""
+        started = datetime.fromisoformat(visit["started_at"])
+        return started - timedelta(seconds=visit.get("before_age_s") or 0)
+
+    def _last_pee_before(self, visit: dict) -> dict | None:
+        """The last counted pee that started before this visit (this visit excluded).
+
+        A manual pee just before the visit is the owner's correction of this same visit, not an
+        earlier pee (Ellie never pees twice within SAME_EVENT).
+        """
+        started = datetime.fromisoformat(visit["started_at"])
+        same = iso(started - SAME_EVENT)
+        start = iso(started - timedelta(days=3))
+        pees = [
+            p for p in self.store.pees_list_between(start, visit["started_at"])
+            if p["id"] != visit["id"] and not (p["source"] == "manual" and p["started_at"] >= same)
+        ]  # fmt: skip
+        return pees[-1] if pees else None
+
+    def _pad_change_for(self, stamp: str) -> dict | None:
+        """The pad change in effect at `stamp` (the newest not undone at or before it)."""
+        changes = [c for c in self.store.pad_changes(50) if c["undone_at"] is None]
+        return max((c for c in changes if c["at"] <= stamp), key=lambda c: c["at"], default=None)
+
+    def _pee_context(self, visit: dict | None) -> str | None:
+        """CONTEXT for the pee prompt (pee_v5): pad age and minutes from the last pee to BEFORE."""
+        if not visit:
+            return None
+        before_at = self._before_at(visit)
+        parts = []
+        change = self._pad_change_for(visit["started_at"])
+        if change:
+            hours = (before_at - datetime.fromisoformat(change["at"])).total_seconds() / 3600
+            parts.append(f"The pad was put in {max(hours, 0):.1f} hours before BEFORE.")
+        last = self._last_pee_before(visit)
+        if last is None or (change and last["started_at"] < change["at"]):
+            parts.append("No pee was counted on this pad yet.")
+        else:
+            last_at = datetime.fromisoformat(last["ended_at"] or last["started_at"])
+            minutes = (before_at - last_at).total_seconds() / 60
+            if minutes < 0:
+                parts.append("The last counted pee came after BEFORE was taken.")
+            else:
+                parts.append(f"The last counted pee was {minutes:.0f} minutes before BEFORE.")
+        return " ".join(parts)
+
+    def _second_pee_opinion(
+        self, visit_id: str, visit: dict, before_path, after_path
+    ) -> float | None:
+        """Gemini saw no pee, but a new stain covers part of the pad: the stained share, else None.
+
+        Not used when a pee came less than SPREAD_MIN before the BEFORE frame: that stain may
+        still be spreading (ADR-0020).
+        """
+        try:
+            stain = pee_stain(before_path.read_bytes(), after_path.read_bytes())
+        except OSError:
+            return None
+        if stain is None:
+            return None
+        last = self._last_pee_before(visit)
+        if last is not None:
+            last_at = datetime.fromisoformat(last["ended_at"] or last["started_at"])
+            if self._before_at(visit) - last_at < SPREAD_MIN:
+                log.info("visit %s: new stain on %.0f%% of the pad, but the pee of %s may still "
+                         "be spreading", visit_id, stain * 100, last["id"])  # fmt: skip
+                return None
+        log.info("visit %s: Gemini saw no pee but %.1f%% of the pad has a new stain, asking the "
+                 "owner", visit_id, stain * 100)  # fmt: skip
+        return stain
+
+    async def _census(self, visit: dict, result) -> None:
+        """More separate stains on the pad than pees counted on it: count the missing ones."""
+        stains = getattr(result, "pad_stains", None)
+        if stains is None or result.image_quality != "ok" or result.pad_replaced:
+            return
+        change = self.store.current_pad_change()
+        if change is None or change["at"] >= visit["started_at"]:
+            return
+        async with self._census_lock:  # two visits decided at once must not both add the same pees
+            await self._census_locked(visit, stains, change)
+
+    async def _census_locked(self, visit: dict, stains: int, change: dict) -> None:
+        end = iso(datetime.fromisoformat(visit["started_at"]) + timedelta(seconds=1))
+        on_pad = [v for v in self.store.pees_list_between(change["at"], end)
+                  if v["pee_where"] != "off_pad"]  # fmt: skip
+        # a visit still waiting for the owner may be one of the stains: never count it twice
+        waiting = [v for v in self.store.visits_started_between(change["at"], end)
+                   if v["state"] == "DECIDED" and v["final_outcome"] is None]  # fmt: skip
+        missing = missing_pees(stains, len(on_pad) + len(waiting))
+        if not missing:
+            return
+        earlier = [v for v in on_pad if v["id"] != visit["id"]]
+        start = datetime.fromisoformat(earlier[-1]["started_at"] if earlier else change["at"])
+        hhmm = (local_text(visit["started_at"]) or "")[11:16]
+        log.info("visit %s: the pad shows %s separate stains but %s pees were counted on it, "
+                 "adding %s found pee(s)", visit["id"], stains, len(on_pad), missing)  # fmt: skip
+        for at in found_pee_times(start, datetime.fromisoformat(visit["started_at"]), missing):
+            found_id = self._manual_visit_id(at)
+            self.store.insert_visit(
+                {
+                    "id": found_id,
+                    "source": "auto",
+                    "started_at": iso(at),
+                    "ended_at": iso(at),
+                    "entries": 1,
+                    "person_present": False,
+                    "frigate_event_ids": [],
+                    "state": "DECIDED",
+                    "auto_outcome": "pee",
+                    "final_outcome": "pee",
+                    "pee_where": "on_pad",
+                    "poop_observed": "none",
+                    "reason": f"{FOUND_PEE_REASON} na visita das {hhmm} "
+                              f"({stains} manchas, {len(on_pad)} contados); hora estimada",
+                    "needs_review": True,
+                    "found_by": visit["id"],
+                    "found_from": iso(start),
+                }
+            )  # fmt: skip
+            await self._visit_decided(found_id, None)
+        await self._alert(
+            f"census_{visit['id']}",
+            "Ellie: xixi achado no tapete",
+            f"Na visita das {hhmm} o tapete tinha {stains} manchas separadas, mas só "
+            f"{len(on_pad)} xixi(s) contado(s) desde a troca. Contei {missing} a mais, com hora "
+            "estimada. Se souber a hora certa, adicione o xixi manual: ele substitui o estimado.",
+        )
+
     def _poop_explained(self, since: str) -> bool:
         """A removed poop is explained by one we know: still open, or cleared since `since`."""
         if self.store.open_poops():
@@ -716,11 +948,47 @@ class Service(PadsMixin):
             for v in self.store.visits_started_between(start, iso(self._clock()))
         )
 
+    async def _frame(self) -> tuple[bytes, bool]:
+        """A cropped camera frame and whether it came from the fallback (Frigate's latest frame).
+
+        go2rtc is tried first (full resolution). When it fails and a fallback is configured, the
+        fallback frame is used, and after CAMERA_ALERT_AFTER of go2rtc failures the owner is told.
+        Raises FrameError when no frame could be had.
+        """
+        now = self._clock()
+        try:
+            frame = await self._fetch_frame()
+        except FrameError as exc:
+            if self._camera_failing_since is None:
+                self._camera_failing_since = now
+            elif now - self._camera_failing_since >= CAMERA_ALERT_AFTER:
+                await self._alert(
+                    "camera",
+                    "Ellie: câmera falhando",
+                    "O go2rtc não entrega a imagem da câmera da Ellie desde "
+                    + (local_text(iso(self._camera_failing_since)) or "")[11:16] + ". "
+                    + ("Estou usando a imagem do Frigate (resolução menor)."
+                       if self._fetch_fallback else "As visitas ficam sem foto.")
+                    + " Se continuar, reinicie a câmera ou o Frigate.",
+                )  # fmt: skip
+            if self._fetch_fallback is None:
+                raise
+            try:
+                frame = await self._fetch_fallback()
+            except FrameError as fallback_exc:
+                raise FrameError(f"{exc}; fallback: {fallback_exc}") from fallback_exc
+            log.warning("go2rtc failed (%s), using Frigate's latest frame", exc)
+            return self._crop(frame), True
+        if self._camera_failing_since is not None:
+            log.info("go2rtc frames are back")
+            self._camera_failing_since = None
+        return self._crop(frame), False
+
     async def _capture_frame(self, visit_id: str, name: str) -> None:
         """Keep a frame of a visit in progress: while she is there, or right after she left
         (before anyone can clean up)."""
         try:
-            frame = self._crop(await self._fetch_frame())
+            frame, _ = await self._frame()
             self.evidence.write(self.evidence.visit_dir(visit_id) / name, frame)
         except (FrameError, OSError) as exc:
             log.warning("visit %s: no %s frame: %s", visit_id, name, exc)
@@ -733,17 +1001,37 @@ class Service(PadsMixin):
         path = self.evidence.visit_dir(visit_id) / f"left_{visit['entries']}.jpg"
         return path.read_bytes() if path.exists() else None
 
-    async def _after_person(self, visit: dict, directory) -> None:
-        """Ask what the person did between her exit frame and the late frame: pad swap, cleanup."""
+    async def _person_check(self, visit_id: str, left: bytes, late: bytes):
+        """Pad answer for her exit frame against the late frame (what the person did), or None."""
         analyser = self.analysers.get(self.cfg["deciding_analyser"])
         if analyser is None or not hasattr(analyser, "analyse_pad"):
-            return
+            return None
         try:
-            result = await analyser.analyse_pad(
-                (directory / "after.jpg").read_bytes(), (directory / AFTER_PERSON).read_bytes()
-            )
-        except (AnalyserError, OSError) as exc:
-            log.warning("visit %s: could not check what the person did: %s", visit["id"], exc)
+            return await analyser.analyse_pad(left, late)
+        except AnalyserError as exc:
+            log.warning("visit %s: could not check what the person did: %s", visit_id, exc)
+            return None
+
+    def _person_changed_nothing(self, result) -> bool:
+        if result is None:
+            return False
+        outcome = decide_pad_change(result, self.cfg["confidence_threshold"])
+        return outcome == "not_replaced" and not result.poop_removed
+
+    async def _after_person(self, visit: dict, directory) -> None:
+        """Act on what the person did between her exit frame and the late frame: pad swap, cleanup."""
+        if visit["id"] in self._person_checks:
+            result = self._person_checks.pop(visit["id"])
+        else:  # e.g. analysed after a restart: ask now
+            try:
+                left = directory / f"left_{visit['entries']}.jpg"
+                result = await self._person_check(
+                    visit["id"], left.read_bytes(), (directory / AFTER_PERSON).read_bytes()
+                )
+            except OSError as exc:
+                log.warning("visit %s: could not check what the person did: %s", visit["id"], exc)
+                return
+        if result is None:
             return
         outcome = decide_pad_change(result, self.cfg["confidence_threshold"])
         log.info("visit %s: the person after her: %s, poop removed %s (%s)",
@@ -756,12 +1044,13 @@ class Service(PadsMixin):
             await self._clear_poops("owner", visit_id=visit["id"])
         elif result.poop_removed and not self.store.labels_for(visit["id"], "poop"):
             since = iso(datetime.fromisoformat(visit["started_at"]) - FOUND_POOP_WINDOW)
-            if not self._poop_explained(since):  # the person cleaned a poop we never counted
-                log.info("visit %s: the person removed a poop Gemini had not seen, counted",
-                         visit["id"])  # fmt: skip
+            if not self._poop_explained(since):  # a poop we never counted, or a misread
+                # Ask, never count: on 2026-11-16 01:20 a fresh IR pee stain that spread was read
+                # as "poop removed" (the only firing since 06/11, and it was wrong). 3.10.1.
+                log.info("visit %s: the person may have removed a poop Gemini had not seen, "
+                         "asking the owner", visit["id"])  # fmt: skip
                 self.store.update_visit(
-                    visit["id"], auto_poop="poop", final_poop="poop", needs_review=True,
-                    poop_cleared_at=iso(self._clock()), poop_cleared_by="owner",
+                    visit["id"], auto_poop="uncertain", final_poop=None, needs_review=True,
                 )  # fmt: skip
 
     async def _analyse(self, visit_id: str, retry: bool = False) -> None:
@@ -776,24 +1065,36 @@ class Service(PadsMixin):
             await self._fail(visit_id, "analysis_failed")
         finally:
             self._inflight.discard(visit_id)
+            self._person_checks.pop(visit_id, None)
 
     async def _analyse_inner(self, visit_id: str, retry: bool) -> None:
         directory = self.evidence.visit_dir(visit_id)
         before_path, after_path = directory / "before.jpg", directory / "after.jpg"
         if not retry:
             try:
-                after = self._crop(await self._fetch_frame())
+                after, fallback = await self._frame()
             except FrameError as exc:
                 log.warning("visit %s: %s", visit_id, exc)
                 return await self._fail(visit_id, "frame_error")
             left = self._left_frame(visit_id)
+            chosen = after
             if left is not None:  # a person came before this frame: it may show a cleaned pad
                 self.evidence.write(directory / AFTER_PERSON, after)
-                log.info("visit %s: a person came before the after frame, using the frame "
-                         "taken when she left", visit_id)  # fmt: skip
-            self.evidence.write(after_path, left if left is not None else after)
+                self.evidence.write(after_path, left)  # a restart during the check keeps a pair
+                person = await self._person_check(visit_id, left, after)
+                self._person_checks[visit_id] = person
+                if self._person_changed_nothing(person):
+                    # the exit frame can still show her when Frigate followed her as a "person"
+                    # (2026-11-14 09:37): the later frame shows the same pad, without anyone
+                    log.info("visit %s: the person after her changed nothing, judging the "
+                             "later frame", visit_id)  # fmt: skip
+                else:
+                    chosen = left
+                    log.info("visit %s: a person came before the after frame, using the frame "
+                             "taken when she left", visit_id)  # fmt: skip
+            self.evidence.write(after_path, chosen)
             self.reference.update(after)  # the next visit starts from this clear frame
-            if self.watch is not None:
+            if self.watch is not None and not fallback:
                 self.watch.rebase(after)  # what changed at the pad is explained by this visit
         if not before_path.exists():
             return await self._fail(visit_id, "no_reference")
@@ -814,10 +1115,12 @@ class Service(PadsMixin):
                 )
 
         started = time.monotonic()
+        visit_row = self.store.get_visit(visit_id)
         try:
             result = await analyser.analyse(
-                before_path.read_bytes(), after_path.read_bytes(), during
-            )
+                before_path.read_bytes(), after_path.read_bytes(), during,
+                context=self._pee_context(visit_row),
+            )  # fmt: skip
         except AnalyserError as exc:
             self.store.insert_analysis(visit_id, analyser.id, "deciding", None, "unknown",
                                        int((time.monotonic() - started) * 1000), str(exc), None)  # fmt: skip
@@ -827,12 +1130,19 @@ class Service(PadsMixin):
         self.store.insert_analysis(visit_id, analyser.id, "deciding",
                                    result.model_dump(exclude_none=True), outcome,
                                    int((time.monotonic() - started) * 1000), None, usage)  # fmt: skip
+        stain = None
+        if outcome == "no_pee" and result.poop == "none" and visit_row["frigate_event_ids"]:
+            stain = self._second_pee_opinion(visit_id, visit_row, before_path, after_path)
+            if stain is not None:
+                outcome = "uncertain"  # the owner decides
         decided = outcome in ("pee", "no_pee")
         fields = {
             "auto_outcome": outcome,
             "pee_where": result.pee_where,
             "poop_observed": result.poop,
-            "reason": result.reason,
+            "reason": result.reason
+            if stain is None
+            else (f"{result.reason} (mas {stain:.0%} do tapete tem mancha nova)"),
             "deciding_analyser": analyser.id,
         }
         if not self.store.labels_for(visit_id, "poop"):  # the owner's poop answer wins too
@@ -847,6 +1157,8 @@ class Service(PadsMixin):
             }
         self.store.update_visit(visit_id, **fields)
         visit = self.store.get_visit(visit_id)
+        if outcome in ("pee", "no_pee"):
+            await self._census(visit, result)
         await self._pad_full_if_outside(visit)
         if visit["final_poop"] == "poop" and visit["poop_cleared_at"] is None:
             self._follow_poop(visit)

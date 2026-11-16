@@ -76,6 +76,8 @@ class FakeAnalyser:
         self.delay_s = delay_s
         self._results = list(results or [])
         self.calls: list[dict[str, int | None]] = []
+        self.contexts: list[str | None] = []
+        self.afters: list[bytes] = []
         self._pad_results: list[PadChangeResult | Exception] = []
         self.pad_calls: list[dict[str, int]] = []
 
@@ -100,7 +102,9 @@ class FakeAnalyser:
         """Replace the queued results (the last one keeps repeating)."""
         self._results = list(results)
 
-    async def analyse(self, before: bytes, after: bytes, during: bytes | None) -> AnalysisResult:
+    async def analyse(
+        self, before: bytes, after: bytes, during: bytes | None, context: str | None = None
+    ) -> AnalysisResult:
         self.calls.append(
             {
                 "before_len": len(before),
@@ -108,6 +112,8 @@ class FakeAnalyser:
                 "during_len": None if during is None else len(during),
             }
         )
+        self.contexts.append(context)
+        self.afters.append(after)
         item: AnalysisResult | Exception
         if not self._results:
             item = make_result()
@@ -159,6 +165,8 @@ def make_visit(**overrides: Any) -> dict:
         "poop_cleared_at": None,
         "poop_cleared_by": None,
         "pee_where": None,
+        "found_by": None,
+        "found_from": None,
     }
     return {**base, **overrides}
 

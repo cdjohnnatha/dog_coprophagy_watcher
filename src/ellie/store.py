@@ -142,6 +142,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE visits ADD COLUMN pee_where TEXT
         CHECK (pee_where IN ('none', 'on_pad', 'off_pad', 'both'));
     """,
+    # 8: a pee found by the stain census (ADR-0020): the visit whose census added it, and the
+    # start of the window it must have happened in (the window ends when that visit started)
+    """
+    ALTER TABLE visits ADD COLUMN found_by TEXT;
+    ALTER TABLE visits ADD COLUMN found_from TEXT;
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -168,6 +174,8 @@ _VISIT_COLUMNS = (
     "poop_cleared_at",
     "poop_cleared_by",
     "pee_where",
+    "found_by",
+    "found_from",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -276,9 +284,13 @@ class Store:
         row = self._db.execute("SELECT * FROM visits WHERE id = ?", (visit_id,)).fetchone()
         return None if row is None else _visit_from_row(row)
 
-    def activity_between(self, start_iso: str, end_iso: str) -> bool:
+    def activity_between(
+        self, start_iso: str, end_iso: str, tables: tuple[str, ...] = ("visits", "presences")
+    ) -> bool:
         """True if a visit or a presence overlaps [start, end] (ISO-8601 UTC strings)."""
-        for table in ("visits", "presences"):
+        for table in tables:
+            if table not in ("visits", "presences"):
+                raise ValueError(f"unknown table {table!r}")
             sql = (
                 f"SELECT 1 FROM {table} "
                 "WHERE started_at <= ? AND COALESCE(ended_at, started_at) >= ? LIMIT 1"

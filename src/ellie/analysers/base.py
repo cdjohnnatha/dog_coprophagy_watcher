@@ -8,7 +8,7 @@ never depend on which analyser answered.
 
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ImageQuality = Literal["ok", "occluded", "too_dark", "camera_moved"]
 PoopObserved = Literal["none", "on_pad", "beside_tray", "unsure"]
@@ -33,7 +33,13 @@ class AnalysisResult(BaseModel):
     image_quality: ImageQuality
     night_mode: bool | None = None
     pee_where: PeeWhere | None = None  # pee_v4: on the pad, outside it (pad full), or both
+    pad_stains: int | None = None  # pee_v5: separate stains in AFTER, clamped to 0..30
     reason: str = Field(max_length=140)
+
+    @field_validator("pad_stains")
+    @classmethod
+    def _clamp_stains(cls, value: int | None) -> int | None:
+        return None if value is None else max(0, min(value, 30))  # a wild count must not fail it
 
 
 class PadChangeResult(BaseModel):
@@ -55,8 +61,13 @@ class Analyser(Protocol):
 
     id: str
 
-    async def analyse(self, before: bytes, after: bytes, during: bytes | None) -> AnalysisResult:
+    async def analyse(
+        self, before: bytes, after: bytes, during: bytes | None, context: str | None = None
+    ) -> AnalysisResult:
         """Analyse JPEG bytes of the before/after crops and the optional during frame.
+
+        `context` is a short text about the pad (age, minutes since the last pee) that a prompt
+        may use (pee_v5); an analyser that does not use it ignores it.
 
         Raises AnalyserError when no valid answer could be produced.
         """

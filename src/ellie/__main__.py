@@ -56,6 +56,7 @@ async def main() -> None:
                 ("pee_v2", "medium"),
                 ("pee_v3", "minimal"),
                 ("pee_v4", "minimal"),  # pee_v3 + where the pee is (pad full, ADR-0017)
+                ("pee_v5", "minimal"),  # pee_v4 + time context and stain census (ADR-0020)
             )
             for prompt, thinking in variants:
                 gemini = GeminiAnalyser(
@@ -81,6 +82,9 @@ async def main() -> None:
             tracker=VisitTracker(),
             analysers=analysers,
             fetch_frame=lambda: frames.fetch_frame(http, options.go2rtc_url, options.camera),
+            fetch_fallback_frame=lambda: frames.fetch_latest(
+                http, options.frigate_url, options.camera
+            ),
             fetch_snapshot=lambda event_id: frames.fetch_snapshot(
                 http, options.frigate_url, event_id
             ),

@@ -220,3 +220,17 @@ def test_pee_v3_only_changes_the_poop_rule() -> None:
     assert "WHOLE image" in v3._pee_prompt and "WHOLE image" not in v1._pee_prompt
     keep = lambda t: [ln for ln in t.splitlines() if not ln.startswith("6. Poop")]
     assert keep(v1._pee_prompt) == keep(v3._pee_prompt)
+
+
+async def test_pee_v5_gets_the_context_and_keeps_the_stain_count():
+    analyser, client, _ = make([answer({**PEE_JSON, "pad_stains": 31})], pee_prompt="pee_v5")
+    result = await analyser.analyse(make_jpeg(), make_jpeg(), None, context="No pee yet.")
+    assert client.calls[0]["input"][0] == {"type": "text", "text": "CONTEXT: No pee yet."}
+    assert result.pad_stains == 30  # clamped, not a failed visit
+
+
+async def test_older_prompts_ignore_the_context_and_any_stain_count():
+    analyser, client, _ = make([answer({**PEE_JSON, "pad_stains": 3})], pee_prompt="pee_v4")
+    result = await analyser.analyse(make_jpeg(), make_jpeg(), None, context="No pee yet.")
+    assert client.calls[0]["input"][0]["text"] == "BEFORE:"
+    assert result.pad_stains is None
