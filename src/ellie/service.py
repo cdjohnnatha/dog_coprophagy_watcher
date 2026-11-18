@@ -170,6 +170,7 @@ class Service(PadsMixin):
         self._poop_asked: set[str] = set()  # visits whose poop question was already sent
         self._presence_retakes: dict[str, int] = {}  # occluded presences: retakes done so far
         self._pad_full_sent: set[str] = set()  # visits whose "pad full" notice went out
+        self._presence_chain: tuple[bytes, datetime] | None = None  # before + end of last presence
         self._census_lock = asyncio.Lock()
         self._person_checks: dict[str, Any] = {}  # visit id -> pad answer for the person after her
 
@@ -454,6 +455,7 @@ class Service(PadsMixin):
             log.warning("manual_poop at %s: the poop of %s is already counted, not added",
                         iso(at), same["id"])  # fmt: skip
             return
+        walk = data.get("where") == "walk"  # seen on a walk: counted, but nothing at the tray
         where = data.get("where") if data.get("where") in ("on_pad", "beside_tray") else "none"
         visit_id = self._manual_visit_id(at)
         self.store.insert_visit(
@@ -472,7 +474,8 @@ class Service(PadsMixin):
                 "poop_cleared_at": iso(at),
                 "poop_cleared_by": "owner",
                 "poop_observed": where,
-                "reason": "cocô adicionado manualmente",
+                "reason": "cocô no passeio" if walk else "cocô adicionado manualmente",
+                "poop_walk": walk,
                 "needs_review": False,
             }
         )
@@ -784,6 +787,7 @@ class Service(PadsMixin):
             await self.publish_state()
 
     def _insert_started(self, visit: dict) -> None:
+        self._presence_chain = None  # a dog visit between two presences breaks the chain
         started = datetime.fromisoformat(visit["started_at"])
         reference = self.reference.before(started)
         age = int((started - reference[1]).total_seconds()) if reference else None

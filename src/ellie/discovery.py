@@ -5,7 +5,7 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
     pee_today: int, visits_today: int, uncertain_open: int, at_tray: bool,
     last_pee: null | {at: ISO-8601 UTC, visit_id, image, reason},
     poop_today: int, poops_by_day: [{date, poops}] (90 days, oldest first),
-    last_poop: null | {at, visit_id, where: on_pad|beside_tray|null, image, reason,
+    last_poop: null | {at, visit_id, where: on_pad|beside_tray|walk|null, image, reason,
                        cleared_at | null, cleared_by | null},
     poop_present: {on: bool, count: int, since: ISO-8601 UTC | null, visit_id | null,
                    where | null, image | null},

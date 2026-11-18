@@ -374,3 +374,89 @@ async def test_a_pee_outside_the_pad_says_the_pad_is_full_and_pads_get_stats(rig
     assert finished["pees_per_day"] == 3.0
     assert pad["avg_days_per_pad"] == 1.2 and pad["pads_per_month"] == 25.0
     assert pad["pads_last_30d"] == 3 and pad["overflow_pees"] == [3]
+
+
+# --- ADR-0021: a cleanup in two steps, "Troquei na última limpeza" ---
+
+
+async def test_a_second_presence_soon_after_keeps_the_first_before(rig):
+    """2026-11-17 22:28: the frame between two steps of one cleanup showed the tray turned over."""
+    old_pad = rig.reference.latest()[0]
+    rig.clock.advance(60)
+    await person_at_the_tray(rig, stay=4)  # the owner takes the tray out: too short, dropped
+    rig.reference.update(make_jpeg((20, 20, 20)))  # the tray turned over, no pad
+    rig.clock.advance(120)
+    rig.analyser.script_pad(make_pad_result(pad_replaced=True, pad_replaced_confidence=0.95))
+    await person_at_the_tray(rig)
+    second = presences(rig)[-1]
+    before = rig.evidence.presence_dir(second["id"]) / "before.jpg"
+    assert before.read_bytes() == old_pad
+    assert rig.store.pad_changes()[0]["presence_id"] == second["id"]
+
+
+async def test_a_presence_long_after_the_last_one_uses_the_newest_reference(rig):
+    rig.clock.advance(60)
+    await person_at_the_tray(rig, stay=4)
+    newer = make_jpeg((20, 20, 20))
+    rig.reference.update(newer)
+    rig.clock.advance(11 * 60)
+    rig.analyser.script_pad(make_pad_result(pad_replaced_confidence=0.5))
+    await person_at_the_tray(rig)
+    second = presences(rig)[-1]
+    assert (rig.evidence.presence_dir(second["id"]) / "before.jpg").read_bytes() == newer
+
+
+async def test_a_dog_visit_breaks_the_chain(rig):
+    rig.clock.advance(60)
+    await person_at_the_tray(rig, stay=4)
+    assert rig.service._presence_chain is not None
+    rig.service._insert_started(one_visit_row(rig))
+    assert rig.service._presence_chain is None
+
+
+def one_visit_row(rig):
+    return {
+        "id": "v_20261031_120500",
+        "source": "auto",
+        "started_at": rig.clock().isoformat().replace("+00:00", "Z"),
+        "entries": 1,
+        "person_present": False,
+        "frigate_event_ids": [],
+        "state": "OPEN",
+    }
+
+
+async def test_last_cleanup_answers_the_pending_question(rig):
+    rig.analyser.script_pad(make_pad_result(pad_replaced=True, pad_replaced_confidence=0.6))
+    await person_at_the_tray(rig)
+    (presence,) = presences(rig)
+    assert last_state(rig)["pad"] is None
+    rig.clock.advance(4 * 3600)
+    await command(rig, "pad_changed", last_presence=True)
+    (change,) = rig.store.pad_changes()
+    assert change["source"] == "confirmed" and change["at"] == presence["ended_at"]
+    assert rig.store.get_presence(presence["id"])["final_outcome"] == "replaced"
+    assert last_state(rig)["pad"]["last_presence_at"] is None  # it made the current change
+
+
+async def test_last_cleanup_after_a_not_replaced_answer_marks_that_time(rig):
+    await command(rig, "pad_changed")
+    rig.clock.advance(3600)
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, pad_replaced_confidence=0.9))
+    await person_at_the_tray(rig)
+    presence = presences(rig)[-1]
+    assert presence["final_outcome"] == "not_replaced"
+    assert last_state(rig)["pad"]["last_presence_at"] == presence["ended_at"]
+    rig.clock.advance(3600)
+    await command(rig, "pad_changed", last_presence=True)
+    current = rig.store.current_pad_change()
+    assert current["source"] == "manual" and current["at"] == presence["ended_at"]
+    assert current["presence_id"] == presence["id"]
+    assert last_state(rig)["pad"]["pees_since"] == 0
+
+
+async def test_last_cleanup_with_nobody_at_the_tray_marks_nothing(rig):
+    await command(rig, "pad_changed")
+    rig.clock.advance(3600)
+    await command(rig, "pad_changed", last_presence=True)
+    assert len(rig.store.pad_changes()) == 1

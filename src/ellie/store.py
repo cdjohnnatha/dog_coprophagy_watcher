@@ -148,6 +148,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE visits ADD COLUMN found_by TEXT;
     ALTER TABLE visits ADD COLUMN found_from TEXT;
     """,
+    # 9: a poop the owner saw on a walk (manual, ADR-0021): counted like any other, never at home
+    """
+    ALTER TABLE visits ADD COLUMN poop_walk INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -176,6 +180,7 @@ _VISIT_COLUMNS = (
     "pee_where",
     "found_by",
     "found_from",
+    "poop_walk",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -192,7 +197,13 @@ _PRESENCE_COLUMNS = (
     "promotion_pending",
 )
 _PAD_CHANGE_COLUMNS = ("id", "at", "source", "presence_id", "visit_id", "pad_color", "undone_at")
-_BOOL_FIELDS = ("person_present", "needs_review", "poop_removed", "promotion_pending")
+_BOOL_FIELDS = (
+    "person_present",
+    "needs_review",
+    "poop_removed",
+    "promotion_pending",
+    "poop_walk",
+)
 _JSON_FIELDS = ("frigate_event_ids", "analysis", "cost_units")
 
 
@@ -206,7 +217,7 @@ def _encode(field: str, value: Any) -> Any:
 
 def _visit_from_row(row: sqlite3.Row) -> dict:
     visit = dict(row)
-    for field in ("person_present", "needs_review"):
+    for field in ("person_present", "needs_review", "poop_walk"):
         if visit[field] is not None:
             visit[field] = bool(visit[field])
     if visit["frigate_event_ids"] is not None:
@@ -404,6 +415,15 @@ class Store:
     def analysing_presences(self) -> list[dict]:
         rows = self._db.execute("SELECT * FROM presences WHERE state IN ('PRESENT', 'ANALYSING')")
         return [self._decoded(r) for r in rows]
+
+    def last_presence(self, since_iso: str) -> dict | None:
+        """The newest finished presence that started after `since_iso` (a person at the tray)."""
+        row = self._db.execute(
+            "SELECT * FROM presences WHERE started_at > ? AND ended_at IS NOT NULL"
+            " AND state = 'DECIDED' ORDER BY started_at DESC LIMIT 1",
+            (since_iso,),
+        ).fetchone()
+        return self._decoded(row)
 
     def pending_promotions(self) -> list[dict]:
         rows = self._db.execute("SELECT * FROM presences WHERE promotion_pending = 1")

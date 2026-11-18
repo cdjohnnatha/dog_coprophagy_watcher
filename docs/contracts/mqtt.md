@@ -37,11 +37,11 @@ All payloads are JSON. Invalid payloads are logged and ignored (never crash).
 | `ellie/cmd/label` | `{visit_id, kind?: "pee"|"poop", label: "pee"|"no_pee"|"poop"|"no_poop", channel, by?}` | Adds a Label (data-model). `kind` defaults to `pee`; `pee`/`no_pee` need kind `pee`, `poop`/`no_poop` need kind `poop` (anything else is ignored). A poop answer never changes the pee outcome and the other way round. `no_poop` also clears a poop that is present. Publishes `ellie/review/resolved` |
 | `ellie/cmd/poop_clear` | `{visit_id?, by?}` | "Limpei": clears the poop of that visit, or every poop that is present when `visit_id` is missing (`poop_cleared_by = owner`). It stays counted |
 | `ellie/cmd/manual_pee` | `{at: ISO-8601 local, by?}` | Creates a `source=manual` visit with `final_outcome=pee` |
-| `ellie/cmd/manual_poop` | `{at: ISO-8601 local, where?: on_pad\|beside_tray, by?}` | Creates a `source=manual` visit with `final_poop=poop` (counted for its day, already cleared so it is never "present"), `final_outcome=no_pee`, and says nothing about the pee. Same time rules as `manual_pee` |
+| `ellie/cmd/manual_poop` | `{at: ISO-8601 local, where?: on_pad\|beside_tray\|walk, by?}` | Creates a `source=manual` visit (`walk`: `poop_walk=1`, reason "cocô no passeio", ADR-0021) with `final_poop=poop` (counted for its day, already cleared so it is never "present"), `final_outcome=no_pee`, and says nothing about the pee. Same time rules as `manual_pee` |
 | `ellie/cmd/reject_last` | `{by?}` | Labels the most recent counted pee (today) as `no_pee` |
 | `ellie/cmd/reanalyse` | `{visit_id, analyser?}` | Re-runs an analyser (default: the deciding one; or e.g. `gemini:pee_v2`) on stored frames and keeps the answer as a shadow analysis. Logged as `reanalyse <id> with <analyser>: <outcome>` |
 | `ellie/cmd/pad_label` | `{presence_id, label: "replaced"|"not_replaced", by?}` | Resolves an uncertain presence. `replaced` creates a Pad change (`source=confirmed`). Publishes `ellie/review/resolved` |
-| `ellie/cmd/pad_changed` | `{at?: ISO-8601 local, by?}` | Pad change `source=manual` (default `at` = now) |
+| `ellie/cmd/pad_changed` | `{at?: ISO-8601 local, last_presence?: true, by?}` | Pad change `source=manual` (default `at` = now). `last_presence`: at the end of the last presence after the current change (12 h max); a presence still waiting for an answer is answered "replaced" instead (ADR-0021) |
 | `ellie/cmd/pad_undo` | `{by?}` | Sets `undone_at` on the current pad change; the previous one becomes current |
 | `ellie/set/<setting>` | value | `confidence_threshold` (0.5–0.99), `merge_gap_s` (15–300), `deciding_analyser` (id), `validation_mode` (`ON`/`OFF`), `pad_change_days` (1–7) |
 
