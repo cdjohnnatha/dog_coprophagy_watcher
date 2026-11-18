@@ -35,6 +35,10 @@ class SmallPersonFilter:
     def is_ellie(self, event_id: str) -> bool:
         return event_id in self._ellie
 
+    def is_big(self, event_id: str) -> bool:
+        """A real person (box of BIG_PERSON_AREA or more), not her."""
+        return event_id in self._big
+
     def reset(self) -> None:
         """Frigate went away or came back: forget every object."""
         self._max_area.clear()

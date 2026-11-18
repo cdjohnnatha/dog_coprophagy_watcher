@@ -1,3 +1,3 @@
 """Ellie: counts the dog's pees per visit (Frigate + Gemini)."""
 
-__version__ = "3.10.2"
+__version__ = "3.10.3"

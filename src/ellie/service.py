@@ -205,6 +205,9 @@ class Service(PadsMixin):
                 presence_actions += more
             event_id = self._dog_event_id(payload)
             actions += self.tracker.on_event(event_id, now) if event_id else []
+            held = self._person_event(payload)
+            if held is not None:
+                presence_actions += self.presence.on_person_event(*held, now)
         elif topic == "frigate/available":
             actions = self.tracker.on_frigate_available(
                 payload.decode(errors="replace").strip() == "online", now
@@ -1389,6 +1392,24 @@ class Service(PadsMixin):
             actions += self.tracker.on_tray_dog(counts["dog"], now)
             presence += self.presence.on_dog_area(counts["dog"], now)
         return actions, presence
+
+    def _person_event(self, payload: bytes) -> tuple[str, bool] | None:
+        """(event id, still going) of a real person who entered tray_area; None otherwise."""
+        try:
+            message = json.loads(payload) or {}
+            after = message.get("after") or {}
+            if after.get("camera") != self.camera or after.get("label") != "person":
+                return None
+            event_id = after.get("id")
+            if not isinstance(event_id, str):
+                return None
+            if message.get("type") == "end" or after.get("end_time"):
+                return event_id, False
+            if "tray_area" not in set(after.get("entered_zones") or []):
+                return None
+        except (ValueError, AttributeError, TypeError):
+            return None
+        return (event_id, True) if self.small_person.is_big(event_id) else None
 
     def _dog_event_id(self, payload: bytes) -> str | None:
         try:
