@@ -491,7 +491,7 @@ def discovery_messages(version: str, analysers: Sequence[str]) -> list[tuple[str
             "name": extra["name"],
             "unique_id": unique_id,
             "default_entity_id": f"{component}.ellie_{obj}",
-            "device": DEVICE,
+            "device": {**DEVICE, "sw_version": version} if version else DEVICE,
             "origin": {"name": "Ellie", "sw_version": version},
             "availability_topic": STATUS_TOPIC,
         }
