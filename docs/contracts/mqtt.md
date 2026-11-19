@@ -25,6 +25,7 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 | `ellie/pad/full` | no | `{visit_id, at, pees_since, image, reason}` when a counted pee was outside the pad (`pee_where` `off_pad` or `both`, prompt pee_v4, ADR-0017), once per visit. HA notifies "Ellie: tapete cheio" (tag `ellie_pad_full`, cleared by the next `ellie/pad/changed`) |
 | `ellie/alert` | no | `{kind: "credit_exhausted"|"gemini_key", title, message}`. Problems only the owner can fix (Gemini credit ran out on HTTP 402, key refused on 401/403). The app sends at most one per kind every 6 h; HA turns it into a phone + persistent notification |
 | `ellie/image/last_pee`, `ellie/image/review_before`, `ellie/image/review_after` | yes | Raw JPEG bytes for the three `image` entities, sent only when the photo changes (last counted pee; before/after of the newest visit in the review queue) |
+| `ellie/image/review_{before,after}_{pad,enh,yellow}` | yes | Raw JPEG bytes of the six pad close-ups of the review-queue head (ADR-0023), written to the visit folder as `<frame>_<kind>.jpg` and sent once per head change; placeholder when a view does not exist |
 | `ellie/image/poop` | yes | Raw JPEG for `image.ellie_poop_photo`: the `after.jpg` of the poop that is present now, else of the last counted poop |
 | `homeassistant/<component>/ellie/<object_id>/config` | yes | MQTT discovery configs |
 

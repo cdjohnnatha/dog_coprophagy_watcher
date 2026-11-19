@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from ellie import discovery
+from ellie import discovery, review_images
 from ellie.analysers.base import Analyser, AnalyserError
 from ellie.census import FOUND_PEE_REASON, found_pee_times, is_found_pee, missing_pees
 from ellie.counting import LOCAL_TZ, Counting, local_date
@@ -1301,6 +1301,7 @@ class Service(PadsMixin):
             sent = await self._publish(topic, path.read_bytes(), True)
             if sent is not False:  # a dropped publish (no MQTT connection yet) must be retried
                 self._image_keys[topic] = visit_id
+        await self._publish_review_closeups(current and current["visit_id"])
         top = self._top_photo(last)
         top_topic = topics["last_pee_photo"]
         if (
@@ -1329,6 +1330,28 @@ class Service(PadsMixin):
             and await self._publish(pad_topic, pad_path.read_bytes(), True) is not False
         ):
             self._image_keys[pad_topic] = str(pad_path)
+
+    async def _publish_review_closeups(self, visit_id: str | None) -> None:
+        """Pad close-ups of the review photos (ADR-0023): written once, sent when the head changes.
+
+        A view that does not exist (infrared frame, missing photo) gets the flat placeholder, so
+        the popup never shows the close-up of an older visit.
+        """
+        topics = discovery.IMAGE_TOPICS
+        keys = [k for k in topics if k.startswith("review_") and k.count("_") == 2]
+        if not visit_id or all(self._image_keys.get(topics[k]) == visit_id for k in keys):
+            return
+        paths = await asyncio.to_thread(
+            review_images.write_variants, self.evidence.visit_dir(visit_id)
+        )
+        for key in keys:
+            topic = topics[key]
+            if self._image_keys.get(topic) == visit_id:
+                continue
+            path = paths.get(key.removeprefix("review_"))
+            body = path.read_bytes() if path is not None else _placeholder_jpeg()
+            if await self._publish(topic, body, True) is not False:
+                self._image_keys[topic] = visit_id
 
     def _top_photo(self, last: dict | None) -> tuple[str, bytes] | None:
         """(key, jpeg) for the big "Foto do tapete": the latest of the last pee and a pad change.

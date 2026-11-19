@@ -33,6 +33,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | `sensor.ellie_pad_change_due` | sensor, `device_class: timestamp` | `changed_at + pad_change_days`. `unknown` until a first change exists |
 | `number.ellie_pad_change_days` | number 1–7 d, default 3 | Tunable 6 (FR-027) |
 | `image.ellie_last_pee_photo`, `image.ellie_review_before`, `image.ellie_review_after` | image (MQTT) | Photos for the dashboard. A `/media/local/...` URL in a card needs a signed URL, so the app sends the bytes and HA serves them with its own auth |
+| `image.ellie_review_{before,after}_{pad,enh,yellow}` (6) | image (MQTT) | Pad close-ups of the review photos for the tap popup (3.10.4, ADR-0023): pad crop, enhanced (white balance, shared stretch, colour ×1.5), LAB b* yellow map. Infrared frame or missing photo: flat placeholder |
 
 ## Defined in the HA repo (`/homeassistant`)
 

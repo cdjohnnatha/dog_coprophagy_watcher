@@ -282,6 +282,12 @@ async def test_photos_go_to_the_image_entities_only_when_they_change(rig):
     assert sent["ellie/image/review_after"] == ((directory / "after.jpg").read_bytes(), True)
     placeholder = sent["ellie/image/last_pee"][0]  # nothing counted yet: a flat placeholder
     assert placeholder != (directory / "after.jpg").read_bytes() and placeholder[:2] == b"\xff\xd8"
+    for frame in ("before", "after"):  # pad close-ups for the popup (ADR-0023)
+        for kind in ("pad", "enh", "yellow"):
+            body = sent[f"ellie/image/review_{frame}_{kind}"][0]
+            path = directory / f"{frame}_{kind}.jpg"
+            assert body == (path.read_bytes() if path.exists() else placeholder)
+    assert (directory / "after_pad.jpg").exists()
 
     count = len([t for t, *_ in rig.published if t.startswith("ellie/image/")])
     await rig.service.minute_tasks()

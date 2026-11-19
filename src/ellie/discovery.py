@@ -50,6 +50,12 @@ IMAGE_TOPICS = {
     "last_pee_photo": "ellie/image/last_pee",
     "review_before": "ellie/image/review_before",
     "review_after": "ellie/image/review_after",
+    # pad close-ups of the review photos, shown on tap (ADR-0023)
+    **{
+        f"review_{frame}_{kind}": f"ellie/image/review_{frame}_{kind}"
+        for frame in ("before", "after")
+        for kind in ("pad", "enh", "yellow")
+    },
     "pad_photo": "ellie/image/pad",
     "poop_photo": "ellie/image/poop",
 }
@@ -459,6 +465,12 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 ("last_pee_photo", "Foto do tapete"),
                 ("review_before", "Revisão: foto antes"),
                 ("review_after", "Revisão: foto depois"),
+                ("review_before_pad", "Revisão: antes, tapete"),
+                ("review_before_enh", "Revisão: antes, realçada"),
+                ("review_before_yellow", "Revisão: antes, mapa de amarelo"),
+                ("review_after_pad", "Revisão: depois, tapete"),
+                ("review_after_enh", "Revisão: depois, realçada"),
+                ("review_after_yellow", "Revisão: depois, mapa de amarelo"),
                 ("pad_photo", "Foto da troca do tapete"),
                 ("poop_photo", "Foto do cocô"),
             )
