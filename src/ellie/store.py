@@ -326,8 +326,9 @@ class Store:
         return self._visits("state = 'ANALYSING'")
 
     def review_queue(self, limit: int = 20) -> list[dict]:
-        """Visits flagged for review, newest first."""
-        sql = f"SELECT * FROM visits WHERE {_NEEDS_REVIEW} ORDER BY started_at DESC LIMIT ?"
+        """Visits flagged for review, oldest first: the owner compares them in the order they
+        happened, so the head is the earliest pending visit (owner, 2026-11-19)."""
+        sql = f"SELECT * FROM visits WHERE {_NEEDS_REVIEW} ORDER BY started_at ASC, id ASC LIMIT ?"
         return [_visit_from_row(r) for r in self._db.execute(sql, (limit,))]
 
     def review_count(self) -> int:

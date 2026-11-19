@@ -89,8 +89,8 @@ def test_state_queries(store):
     assert [v["id"] for v in store.open_visits()] == ["a", "b", "c"]
     assert [v["id"] for v in store.analysing_visits()] == ["d"]
     store.update_visit("c", started_at="2026-01-02T00:00:00Z")
-    assert [v["id"] for v in store.review_queue()] == ["c", "d"]
-    assert [v["id"] for v in store.review_queue(limit=1)] == ["c"]
+    assert [v["id"] for v in store.review_queue()] == ["d", "c"]  # oldest first
+    assert [v["id"] for v in store.review_queue(limit=1)] == ["d"]
 
 
 def test_analyses(store):
