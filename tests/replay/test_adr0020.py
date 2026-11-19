@@ -148,6 +148,35 @@ async def test_no_question_while_the_last_pee_may_still_be_spreading(tmp_path, c
     assert visit["auto_outcome"] == "no_pee"
 
 
+async def test_a_big_pee_still_spreads_43_minutes_later_and_the_skip_is_logged(tmp_path, clock):
+    """2026-11-19 12:13 pee, 12:56 visit: 8.9 % new stain was the same pee spreading."""
+    rig = build(tmp_path, clock, [DOG, STAINED])
+    earlier = iso(clock() - timedelta(minutes=43))
+    rig.store.insert_visit(make_visit(id="v_20261029_113200", started_at=earlier, ended_at=earlier))
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.95))
+    await one_visit(rig)
+    visit = visits(rig)[-1]
+    assert visit["auto_outcome"] == "no_pee"
+    (line,) = (rig.evidence.root / "spread_skips.jsonl").read_text().splitlines()
+    row = json.loads(line)
+    assert row["visit_id"] == visit["id"] and row["last_pee_id"] == "v_20261029_113200"
+    assert 43 <= row["minutes_since_pee"] < 45 and row["stain_pct"] > 2
+    # the pad photo now shows the spread stain; the pee's own frame is untouched
+    pee_dir = rig.evidence.visit_dir("v_20261029_113200")
+    assert (pee_dir / "after_spread.jpg").read_bytes() == STAINED
+    await rig.service.minute_tasks()
+    assert topics(rig, "ellie/image/last_pee")[-1] == STAINED
+
+
+async def test_a_new_stain_an_hour_after_the_last_pee_is_asked(tmp_path, clock):
+    rig = build(tmp_path, clock, [DOG, STAINED])
+    earlier = iso(clock() - timedelta(minutes=65))
+    rig.store.insert_visit(make_visit(id="v_20261029_105500", started_at=earlier, ended_at=earlier))
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.95))
+    await one_visit(rig)
+    assert visits(rig)[-1]["auto_outcome"] == "uncertain"
+
+
 async def test_a_watch_visit_gets_no_stain_opinion(tmp_path, clock):
     rig = build(tmp_path, clock, [STAINED])
     rig.analyser.script(make_result(pee=False, pee_confidence=0.95))

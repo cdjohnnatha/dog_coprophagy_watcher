@@ -47,7 +47,12 @@ WATCH_EXPLAIN_S = 180  # a visit or presence this close to a candidate already e
 # 03:46 settle within 5 min) and Ellie never pees twice in a short time (shortest gap between two
 # real pees in 45: 84 min). So growth within SPREAD_MIN of a pee is that pee; later it is a new one
 # (ADR-0020). SAME_PEE is the window in which two entries are one and the same pee or poop.
-SPREAD_MIN = timedelta(minutes=15)
+# 2026-11-19: a big pee was still spreading 43 min later (12:13 → 12:56, owner asked for nothing);
+# shortest gap between real pees in 52 is 87 min, so the window is 60 min (ADR-0020 amendment).
+# Every skipped question is logged to SPREAD_LOG to check the number against the owner's list.
+SPREAD_MIN = timedelta(minutes=60)
+SPREAD_LOG = "spread_skips.jsonl"
+SPREAD_PHOTO = "after_spread.jpg"  # the latest frame of a pee that kept spreading (display only)
 SAME_EVENT = timedelta(minutes=30)
 FOUND_MATCH = timedelta(hours=6)  # a manual pee takes over a found pee of the same pad this close
 CAMERA_ALERT_AFTER = timedelta(minutes=15)  # go2rtc failing this long: tell the owner
@@ -867,8 +872,8 @@ class Service(PadsMixin):
     ) -> float | None:
         """Gemini saw no pee, but a new stain covers part of the pad: the stained share, else None.
 
-        Not used when a pee came less than SPREAD_MIN before the BEFORE frame: that stain may
-        still be spreading (ADR-0020).
+        Not used when a pee came less than SPREAD_MIN (60 min) before the BEFORE frame: that stain
+        may still be spreading (ADR-0020); the skip is logged to SPREAD_LOG.
         """
         try:
             stain = pee_stain(before_path.read_bytes(), after_path.read_bytes())
@@ -879,13 +884,48 @@ class Service(PadsMixin):
         last = self._last_pee_before(visit)
         if last is not None:
             last_at = datetime.fromisoformat(last["ended_at"] or last["started_at"])
-            if self._before_at(visit) - last_at < SPREAD_MIN:
-                log.info("visit %s: new stain on %.0f%% of the pad, but the pee of %s may still "
-                         "be spreading", visit_id, stain * 100, last["id"])  # fmt: skip
+            since = self._before_at(visit) - last_at
+            if since < SPREAD_MIN:
+                log.info("visit %s: new stain on %.0f%% of the pad, but the pee of %s (%.0f min "
+                         "before) may still be spreading", visit_id, stain * 100, last["id"],
+                         since.total_seconds() / 60)  # fmt: skip
+                self._log_spread_skip(visit_id, last["id"], since, stain)
+                self._keep_spread_photo(last["id"], after_path)
                 return None
         log.info("visit %s: Gemini saw no pee but %.1f%% of the pad has a new stain, asking the "
                  "owner", visit_id, stain * 100)  # fmt: skip
         return stain
+
+    def _keep_spread_photo(self, pee_id: str, after_path) -> None:
+        """Show the spread stain as the pee's pad photo (owner, 2026-11-19).
+
+        Copied to SPREAD_PHOTO next to the pee's own frames; after.jpg stays untouched (Gemini,
+        labels and the dataset use it).
+        """
+        try:
+            folder = self.evidence.visit_dir(pee_id)
+            folder.mkdir(parents=True, exist_ok=True)  # a manual pee has no folder yet
+            target = folder / SPREAD_PHOTO
+            tmp = target.with_suffix(".tmp")
+            tmp.write_bytes(after_path.read_bytes())
+            tmp.replace(target)
+        except (OSError, ValueError):  # ValueError: malformed id
+            log.warning("could not keep the spread photo of %s", pee_id)
+
+    def _log_spread_skip(self, visit_id: str, pee_id: str, since: timedelta, stain: float) -> None:
+        """One JSON line per question not asked because the last pee may still be spreading."""
+        row = {
+            "at": iso(self._clock()),
+            "visit_id": visit_id,
+            "last_pee_id": pee_id,
+            "minutes_since_pee": round(since.total_seconds() / 60, 1),
+            "stain_pct": round(stain * 100, 1),
+        }
+        try:
+            with (self.evidence.root / SPREAD_LOG).open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except OSError:
+            log.warning("could not write %s", SPREAD_LOG)
 
     async def _census(self, visit: dict, result) -> None:
         """More separate stains on the pad than pees counted on it: count the missing ones."""
@@ -1356,6 +1396,8 @@ class Service(PadsMixin):
     def _top_photo(self, last: dict | None) -> tuple[str, bytes] | None:
         """(key, jpeg) for the big "Foto do tapete": the latest of the last pee and a pad change.
 
+        A pee that kept spreading shows its latest spread frame (SPREAD_PHOTO).
+
         After a pad change the clean pad replaces the stained photo until the next pee. A manual
         mark has no photo, so it waits for a reference frame taken after the mark (the owner may
         tap right after swapping, when the newest reference still shows the old pad).
@@ -1373,7 +1415,11 @@ class Service(PadsMixin):
                 return f"pad:{change['id']}", reference[0]
             return None  # keep what is shown; the next minute's reference will do
         if last is not None:
-            path = self.evidence.visit_dir(last["visit_id"]) / "after.jpg"
+            folder = self.evidence.visit_dir(last["visit_id"])
+            spread = folder / SPREAD_PHOTO  # the same pee, photographed after it spread
+            if spread.exists():
+                return f"{last['visit_id']}:{spread.stat().st_mtime_ns}", spread.read_bytes()
+            path = folder / "after.jpg"
             if path.exists():
                 return last["visit_id"], path.read_bytes()
         return "placeholder", _placeholder_jpeg()  # a manual or undone pee has no photo
