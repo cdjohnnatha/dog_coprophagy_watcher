@@ -18,7 +18,7 @@ All entities are created by MQTT discovery under one device **"Ellie"** (`identi
 | `binary_sensor.ellie_poop_present` | binary_sensor (`ON`/`OFF`) | ON while a counted poop is not cleared (ADR-0014). Attr: `count`, `since`, `visit_id`, `where`, `image` (newest open poop). Clears itself: the pad watch sees the blob gone, a pad change (on-pad poops), `ellie/cmd/poop_clear`, an owner `no_poop`, or 12 h |
 | `image.ellie_poop_photo` | image (MQTT) | `after.jpg` of the poop present now, else of the last counted one |
 | `sensor.ellie_pee_daily_history` | sensor | State = days with data. Attr `days`: `[{date, pees, visits, corrected}]`, last 90 days (back-dated corrections included) |
-| `sensor.ellie_review_queue` | sensor | Count of visits with `needs_review` or an open poop question. Attr `items`: `[{visit_id, time, auto_outcome, final_outcome, reason, pee_question, poop_question, poop_observed, before, after}]` (max 20, newest first) |
+| `sensor.ellie_review_queue` | sensor | Count of visits with `needs_review` or an open poop question. Attr `items`: `[{visit_id, time, auto_outcome, final_outcome, reason, pee_question, poop_question, poop_observed, before, after}]` (max 20, oldest first since 3.10.5: the head is the earliest pending visit) |
 | `sensor.ellie_pee_accuracy` | sensor, `%` | Deciding analyser accuracy over the window (default 14 days). Attr `analysers`: `{id: {labelled, agree, accuracy}}`, `window_days` |
 | `sensor.ellie_last_visit` | sensor | `auto_outcome` of the latest visit. Attr: full visit JSON |
 | `sensor.ellie_analysis_calls_month` | sensor, `state_class: total_increasing` | Cloud calls this month. Attr: `tokens_in`, `tokens_out`, `estimated_cost_eur` |
