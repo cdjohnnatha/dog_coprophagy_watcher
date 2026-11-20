@@ -137,6 +137,24 @@ async def test_label_from_phone_button_and_dashboard(rig):
     assert rig.store.get_visit("v_20260710_190000")["final_outcome"] == "no_pee"
 
 
+async def test_dashboard_answer_in_doubt_reaches_the_app(rig):
+    """3.10.8: "Na dúvida…" sends the bad photo and the reason with the answer."""
+    put_visit(rig, needs_review=True, final_outcome=None, auto_outcome="uncertain")
+    await rig.service.publish_state()
+    ha = Ha(ha_from_state(last_state(rig)), NOW)
+    _, payload = render_payload(
+        "ellie_label_current_review", ha, answer="no", doubt_photos="after", doubt_reason="glare"
+    )
+    assert json.loads(payload)["doubt"] == {"photos": "after", "reason": "glare"}
+    await rig.service.on_command("label", payload.encode())
+    (label,) = rig.store.labels_for("v_20260710_190000")
+    assert (label["label"], label["doubt_photos"], label["doubt_reason"]) == (
+        "no_pee",
+        "after",
+        "glare",
+    )
+
+
 # ---------- defects ----------
 
 
