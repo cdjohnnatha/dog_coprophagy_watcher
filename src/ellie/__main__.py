@@ -57,6 +57,7 @@ async def main() -> None:
                 ("pee_v3", "minimal"),
                 ("pee_v4", "minimal"),  # pee_v3 + where the pee is (pad full, ADR-0017)
                 ("pee_v5", "minimal"),  # pee_v4 + time context and stain census (ADR-0020)
+                ("pee_v6", "minimal"),  # pee_v5 + the pad history in CONTEXT (ADR-0025)
             )
             for prompt, thinking in variants:
                 gemini = GeminiAnalyser(

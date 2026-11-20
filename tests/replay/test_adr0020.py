@@ -489,3 +489,26 @@ async def test_a_manual_pee_shows_the_pad_seen_after_it(tmp_path, clock):
     rig.reference.update(STAINED)  # the camera's clear-area frame, taken now
     await rig.service.publish_state()
     assert topics(rig, "ellie/image/last_pee")[-1] == STAINED
+
+
+async def test_gemini_gets_the_pad_history(tmp_path, clock):
+    """Owner, 2026-11-20: the pad's own story in the written CONTEXT (pees, poops, people)."""
+    rig = build(tmp_path, clock, [DOG, CLEAN])
+    now = clock()
+    rig.store.insert_pad_change({"id": "p_1", "at": iso(now - timedelta(hours=5)),
+                                 "source": "detected"})  # fmt: skip
+    t1, t2 = iso(now - timedelta(hours=4)), iso(now - timedelta(hours=2))
+    rig.store.insert_visit(make_visit(id="v_20261029_080000", source="manual", started_at=t1,
+                                      ended_at=t1))  # fmt: skip
+    rig.store.insert_visit(make_visit(id="v_20261029_100000", started_at=t2, ended_at=t2,
+                                      final_poop="poop", poop_observed="on_pad"))  # fmt: skip
+    p1, p2 = iso(now - timedelta(minutes=30)), iso(now - timedelta(minutes=27))
+    rig.store.insert_presence({"id": "s_20261029_113000", "started_at": p1, "ended_at": p2,
+                               "state": "DECIDED"})  # fmt: skip
+    await one_visit(rig)
+    (context,) = rig.analyser.contexts
+    assert "2 pee(s) were counted on this pad before BEFORE" in context
+    assert "added by the owner" in context and "seen by the camera" in context
+    assert "A poop on the pad was counted" in context and "not removed yet" in context
+    assert "A person was at the tray after that" in context
+    assert "last counted pee was 120 minutes before BEFORE" in context

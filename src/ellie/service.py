@@ -853,15 +853,51 @@ class Service(PadsMixin):
         return max((c for c in changes if c["at"] <= stamp), key=lambda c: c["at"], default=None)
 
     def _pee_context(self, visit: dict | None) -> str | None:
-        """CONTEXT for the pee prompt (pee_v5): pad age and minutes from the last pee to BEFORE."""
+        """CONTEXT for the pee prompt: the history of the pad up to BEFORE (pee_v5, pee_v6).
+
+        Pad age, every pee and poop counted on this pad (time, how it was counted), poops not
+        cleared yet, people at the tray since the last event, and the minutes from the last pee
+        to BEFORE. Written facts only: Gemini still judges the images (owner, 2026-11-20).
+        """
         if not visit:
             return None
         before_at = self._before_at(visit)
+        before_iso = iso(before_at)
+        hhmm = lambda at: (local_text(at) or "")[11:16]
         parts = []
         change = self._pad_change_for(visit["started_at"])
         if change:
             hours = (before_at - datetime.fromisoformat(change["at"])).total_seconds() / 3600
-            parts.append(f"The pad was put in {max(hours, 0):.1f} hours before BEFORE.")
+            parts.append(
+                f"The pad was put in {max(hours, 0):.1f} hours before BEFORE (at {hhmm(change['at'])})."
+            )
+        start = change["at"] if change else iso(before_at - timedelta(days=1))
+        earlier = [
+            v for v in self.store.visits_started_between(start, before_iso)
+            if v["id"] != visit["id"]
+        ]  # fmt: skip
+        pees = [v for v in earlier if v.get("final_outcome") == "pee"]
+        how = {"manual": "added by the owner"}
+        if pees:
+            listed = ", ".join(
+                f"{hhmm(p['started_at'])} ({how.get(p.get('source'), 'found by a stain count' if p.get('found_by') else 'seen by the camera')})"
+                for p in pees
+            )
+            parts.append(
+                f"{len(pees)} pee(s) were counted on this pad before BEFORE: {listed}. Their marks "
+                "are old; they may have merged into fewer stains."
+            )
+        poops = [v for v in earlier if v.get("final_poop") == "poop"]
+        for p in poops:
+            where = {"on_pad": "on the pad", "beside_tray": "beside the tray"}.get(
+                p.get("poop_observed"), "near the tray"
+            )
+            state = (
+                f"removed at {hhmm(p['poop_cleared_at'])}"
+                if p.get("poop_cleared_at")
+                else "not removed yet (it is old if you see it in BEFORE)"
+            )
+            parts.append(f"A poop {where} was counted at {hhmm(p['started_at'])}, {state}.")
         last = self._last_pee_before(visit)
         if last is None or (change and last["started_at"] < change["at"]):
             parts.append("No pee was counted on this pad yet.")
@@ -872,6 +908,14 @@ class Service(PadsMixin):
                 parts.append("The last counted pee came after BEFORE was taken.")
             else:
                 parts.append(f"The last counted pee was {minutes:.0f} minutes before BEFORE.")
+        since = last["started_at"] if last is not None and last["started_at"] > start else start
+        people = self.store.presences_between(since, before_iso)
+        if people:
+            times = ", ".join(f"{hhmm(p['started_at'])}-{hhmm(p['ended_at'])}" for p in people[-3:])
+            parts.append(
+                f"A person was at the tray after that ({times}) and did not change the pad: the "
+                "tray may have been moved or cleaned of poop."
+            )
         return " ".join(parts)
 
     def _second_pee_opinion(

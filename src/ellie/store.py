@@ -430,6 +430,15 @@ class Store:
         rows = self._db.execute("SELECT * FROM presences WHERE promotion_pending = 1")
         return [self._decoded(r) for r in rows]
 
+    def presences_between(self, start_iso: str, end_iso: str) -> list[dict]:
+        """Finished presences (a person at the tray) started in [start, end), oldest first."""
+        rows = self._db.execute(
+            "SELECT * FROM presences WHERE started_at >= ? AND started_at < ?"
+            " AND ended_at IS NOT NULL ORDER BY started_at",
+            (start_iso, end_iso),
+        )
+        return [dict(r) for r in rows]
+
     def insert_pad_change(self, change: dict) -> None:
         self._insert("pad_changes", _PAD_CHANGE_COLUMNS, change)
 

@@ -234,3 +234,13 @@ async def test_older_prompts_ignore_the_context_and_any_stain_count():
     result = await analyser.analyse(make_jpeg(), make_jpeg(), None, context="No pee yet.")
     assert client.calls[0]["input"][0]["text"] == "BEFORE:"
     assert result.pad_stains is None
+
+
+async def test_pee_v6_gets_the_pad_history_and_keeps_the_stain_count():
+    analyser, client, _ = make([answer({**PEE_JSON, "pad_stains": 2})], pee_prompt="pee_v6")
+    result = await analyser.analyse(
+        make_jpeg(), make_jpeg(), None, context="1 pee(s) were counted."
+    )
+    assert client.calls[0]["input"][0]["text"].startswith("CONTEXT: 1 pee(s)")
+    assert result.pad_stains == 2
+    assert analyser.id.endswith("pee_v6")
