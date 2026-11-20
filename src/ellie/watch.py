@@ -87,6 +87,7 @@ class Candidate:
     before_norm: list[float] | None = None  # normalised frame before it
     before_brightness: float | None = None
     lasting: bool = False  # confirmed by a lasting change, not by a frame like the candidate one
+    held: bool = False  # compared with the frame held before a floor change (pad_held)
 
 
 def _pixels(jpeg: bytes) -> list[float]:
@@ -532,6 +533,7 @@ class PadWatch:
             before_norm=held_norm,
             before_brightness=held_brightness,
             lasting=True,
+            held=True,
         )
 
     def _resolve_pending(

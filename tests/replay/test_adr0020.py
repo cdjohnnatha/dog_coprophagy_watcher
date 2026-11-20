@@ -428,3 +428,64 @@ async def test_undoing_the_pad_change_drops_the_found_pees(tmp_path, clock):
     assert len(_found(rig)) == 2
     await rig.service.on_message("ellie/cmd/pad_undo", b"{}")
     assert _found(rig) == []
+
+
+# --- 2026-11-20: held frame after a person left, found pee photos, manual pee photo ---
+
+
+async def test_a_held_frame_change_after_the_person_left_opens_a_visit(tmp_path, clock):
+    """12:38 pee (Frigate saw no dog): the owner had left the tray at 12:34, the held frame is
+    from 12:37:50, so the presence cannot explain the new patch."""
+    rig = build(tmp_path, clock, [STAINED])
+    rig.analyser.script(make_result(pee=True, pee_confidence=0.9))
+    now = clock()
+    rig.store.insert_presence({"id": "s_1", "started_at": iso(now - timedelta(minutes=12)),
+                               "ended_at": iso(now - timedelta(minutes=8)),
+                               "state": "DECIDED"})  # fmt: skip
+    found = Candidate(at=now, before_at=now - timedelta(minutes=3), before_jpeg=CLEAN,
+                      after_jpeg=STAINED, pad_step=0.2, ctrl_step=0.02, norm=[], brightness=120,
+                      lasting=True, held=True)  # fmt: skip
+    await rig.service._open_watch_visit(found)
+    await rig.service.wait_idle()
+    (visit,) = visits(rig)
+    assert visit["final_outcome"] == "pee"
+
+
+async def test_a_lasting_non_held_change_after_activity_is_still_ignored(tmp_path, clock):
+    rig = build(tmp_path, clock, [STAINED])
+    now = clock()
+    rig.store.insert_presence({"id": "s_1", "started_at": iso(now - timedelta(minutes=12)),
+                               "ended_at": iso(now - timedelta(minutes=8)),
+                               "state": "DECIDED"})  # fmt: skip
+    found = Candidate(at=now, before_at=now - timedelta(minutes=3), before_jpeg=CLEAN,
+                      after_jpeg=STAINED, pad_step=0.2, ctrl_step=0.02, norm=[], brightness=120,
+                      lasting=True)  # fmt: skip
+    await rig.service._open_watch_visit(found)
+    assert visits(rig) == []
+
+
+async def test_a_found_pee_in_review_shows_the_frames_of_the_visit_that_found_it(tmp_path, clock):
+    rig = build(tmp_path, clock, [CLEAN])
+    at = iso(clock() - timedelta(minutes=5))
+    finder = make_visit(id="v_20261029_115500", started_at=at, ended_at=at, final_outcome="no_pee")
+    rig.store.insert_visit(finder)
+    folder = rig.evidence.visit_dir(finder["id"])
+    rig.evidence.write(folder / "before.jpg", CLEAN)
+    rig.evidence.write(folder / "after.jpg", STAINED)
+    found_at = iso(clock() - timedelta(minutes=20))
+    rig.store.insert_visit(make_visit(id="v_20261029_114000", started_at=found_at,
+                                      ended_at=found_at, needs_review=True,
+                                      found_by=finder["id"]))  # fmt: skip
+    await rig.service.publish_state()
+    assert topics(rig, "ellie/image/review_after")[-1] == STAINED
+    assert topics(rig, "ellie/image/review_before")[-1] == CLEAN
+
+
+async def test_a_manual_pee_shows_the_pad_seen_after_it(tmp_path, clock):
+    rig = build(tmp_path, clock, [CLEAN])
+    at = iso(clock() - timedelta(minutes=2))
+    rig.store.insert_visit(make_visit(id="v_20261029_115800", source="manual", started_at=at,
+                                      ended_at=at))  # fmt: skip
+    rig.reference.update(STAINED)  # the camera's clear-area frame, taken now
+    await rig.service.publish_state()
+    assert topics(rig, "ellie/image/last_pee")[-1] == STAINED

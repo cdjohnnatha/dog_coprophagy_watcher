@@ -511,7 +511,14 @@ class Service(PadsMixin):
         ):
             log.info("watch: a visit or presence already explains the change, no new visit")
             return
-        if found.lasting and self._recent_activity(found.before_at - LASTING_QUIET):
+        # A held frame was taken after the activity window checked above, so a person who left
+        # before it cannot explain the change (2026-11-20 12:38 pee and 12:45 poop, Frigate saw
+        # no dog, dropped here because the owner had been at the tray at 12:30-12:34).
+        if (
+            found.lasting
+            and not found.held
+            and self._recent_activity(found.before_at - LASTING_QUIET)
+        ):
             # a tray lifted, cleaned and put back, or a puddle drying, also leaves a lasting change
             # (2026-11-09 12:59, 13:17, 13:28): only a quiet tray may confirm this way
             log.info("watch: lasting change right after activity at the tray, no new visit")
@@ -1333,12 +1340,13 @@ class Service(PadsMixin):
             topics["review_after"]: (current and current["visit_id"], "after.jpg"),
         }
         for topic, (visit_id, name) in wanted.items():
-            path = self.evidence.visit_dir(visit_id) / name if visit_id else None
             if not visit_id or self._image_keys.get(topic) == visit_id:
                 continue
-            if path is None or not path.exists():
-                continue
-            sent = await self._publish(topic, path.read_bytes(), True)
+            path = self._photo_dir(visit_id) / name
+            # never leave the photos of an older visit on screen (2026-11-20 07:41 found pee
+            # showed the pad before the change): placeholder when there is no photo at all
+            body = path.read_bytes() if path.exists() else _placeholder_jpeg()
+            sent = await self._publish(topic, body, True)
             if sent is not False:  # a dropped publish (no MQTT connection yet) must be retried
                 self._image_keys[topic] = visit_id
         await self._publish_review_closeups(current and current["visit_id"])
@@ -1371,6 +1379,24 @@ class Service(PadsMixin):
         ):
             self._image_keys[pad_topic] = str(pad_path)
 
+    def _photo_dir(self, visit_id: str):
+        """Folder with the BEFORE/AFTER to show for a visit: its own, else the visit that found it.
+
+        A pee found by the stain census has no frames; the frames of the visit that found it
+        show the stain. Falls back to the visit's own (possibly empty) folder.
+        """
+        own = self.evidence.visit_dir(visit_id)
+        if (own / "after.jpg").exists() or (own / "before.jpg").exists():
+            return own
+        visit = self.store.get_visit(visit_id)
+        finder = visit.get("found_by") if visit else None
+        if finder:
+            try:
+                return self.evidence.visit_dir(finder)
+            except ValueError:
+                pass
+        return own
+
     async def _publish_review_closeups(self, visit_id: str | None) -> None:
         """Pad close-ups of the review photos (ADR-0023): written once, sent when the head changes.
 
@@ -1381,9 +1407,7 @@ class Service(PadsMixin):
         keys = [k for k in topics if k.startswith("review_") and k.count("_") == 2]
         if not visit_id or all(self._image_keys.get(topics[k]) == visit_id for k in keys):
             return
-        paths = await asyncio.to_thread(
-            review_images.write_variants, self.evidence.visit_dir(visit_id)
-        )
+        paths = await asyncio.to_thread(review_images.write_variants, self._photo_dir(visit_id))
         for key in keys:
             topic = topics[key]
             if self._image_keys.get(topic) == visit_id:
@@ -1419,10 +1443,15 @@ class Service(PadsMixin):
             spread = folder / SPREAD_PHOTO  # the same pee, photographed after it spread
             if spread.exists():
                 return f"{last['visit_id']}:{spread.stat().st_mtime_ns}", spread.read_bytes()
-            path = folder / "after.jpg"
+            path = self._photo_dir(last["visit_id"]) / "after.jpg"
             if path.exists():
                 return last["visit_id"], path.read_bytes()
-        return "placeholder", _placeholder_jpeg()  # a manual or undone pee has no photo
+            # a manual pee has no photo: show the pad as the camera saw it after the pee
+            # (2026-11-20 07:41 manual pee kept the placeholder)
+            reference = self.reference.latest()
+            if reference is not None and reference[1] >= datetime.fromisoformat(last["at"]):
+                return f"{last['visit_id']}:ref", reference[0]
+        return "placeholder", _placeholder_jpeg()  # no photo yet
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
         return await self._publish_fn(topic, payload, retain)
