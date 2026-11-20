@@ -61,6 +61,11 @@ FLOOR_RATIO = 20.0  # the blob must stand out this many times above the mean dar
 POOP_TRACK_MIN_PEAK = 0.6  # a weaker blob cannot be told from noise: not tracked
 POOP_GONE_RATIO = 0.35
 POOP_GONE_FRAMES = 2
+# The floor changed with the light steady (2026-11-18 11:59: the bath mat moved in the same minute
+# Ellie pooped on the pad, Frigate did not see her in her sweater, and the minute was taken for
+# light). The frame before is HELD; once the floor is quiet again the pad is compared with it, and
+# a new dark patch there (PAD_BLOCK_MIN) is a confirmed change (ADR-0022). Given up after this:
+HOLD_TTL_S = 900
 CSV_HEADER = "at,pad_step,ctrl_step,brightness,light_jump,candidate,confirmed,floor_peak,kind\n"
 
 
@@ -82,6 +87,7 @@ class Candidate:
     before_norm: list[float] | None = None  # normalised frame before it
     before_brightness: float | None = None
     lasting: bool = False  # confirmed by a lasting change, not by a frame like the candidate one
+    held: bool = False  # compared with the frame held before a floor change (pad_held)
 
 
 def _pixels(jpeg: bytes) -> list[float]:
@@ -310,6 +316,8 @@ class PadWatch:
         self._prev: tuple[list[float], float, bytes, datetime] | None = None
         self._pending: Candidate | None = None
         self._pending_row: dict | None = None
+        # frame before a floor change with steady light: (normalised, grey level, jpeg, time, since)
+        self._held: tuple[list[float], float, bytes, datetime, datetime] | None = None
         self.last_row: dict | None = None  # the metrics of the latest observation (for tests/logs)
         self.confirmed_total = 0
         self._poops: dict[str, PoopTrack] = {}
@@ -381,6 +389,7 @@ class PadWatch:
         if self._pending is not None:
             log.info("watch: candidate dropped, a visit explains it")
             self._pending = self._pending_row = None
+        self._held = None
         self._prev = (_normalise(px), sum(px) / len(px), crop_jpeg, self._clock())
 
     def observe(self, crop_jpeg: bytes) -> Candidate | None:
@@ -412,6 +421,14 @@ class PadWatch:
                 and ctrl_step <= CTRL_MAX
                 and pad_step >= STEP_RATIO * max(ctrl_step, 0.02)
             )
+            held = self._resolve_held(norm, brightness, now, crop_jpeg, pad_step, ctrl_step, jump)
+            if held is not None:
+                self._prev = (norm, brightness, crop_jpeg, now)
+                return held
+            if self._held is None and not jump and ctrl_step > CTRL_MAX:
+                self._held = (prev_norm, prev_brightness, prev_jpeg, prev_at, now)
+                log.info("watch: the floor changed with steady light (%.2f): holding the frame "
+                         "before it", ctrl_step)  # fmt: skip
             peak, floor_dark, peak_cell = _floor_peak(prev_norm, norm)
             floor = (
                 not candidate
@@ -460,6 +477,64 @@ class PadWatch:
                 self._write(row)
         self._prev = (norm, brightness, crop_jpeg, now)
         return None
+
+    def _resolve_held(
+        self,
+        norm: list[float],
+        brightness: float,
+        now: datetime,
+        crop_jpeg: bytes,
+        pad_step: float,
+        ctrl_step: float,
+        jump: bool,
+    ) -> Candidate | None:
+        """Once the floor is quiet again, a new dark patch on the pad against the held frame is a
+        confirmed change (a lasting one: she has left). Any other outcome forgets the held frame."""
+        if self._held is None:
+            return None
+        held_norm, held_brightness, held_jpeg, held_at, since = self._held
+        if (now - since).total_seconds() > HOLD_TTL_S or jump:
+            self._held = None
+            return None
+        if ctrl_step > CTRL_MAX:
+            return None  # still moving: wait
+        self._held = None
+        if abs(brightness - held_brightness) >= LIGHT_JUMP:
+            return None
+        dark = pad_dark_block(held_norm, norm)
+        if dark < PAD_BLOCK_MIN:
+            log.info("watch: floor quiet again, nothing new on the pad (%.2f)", dark)
+            return None
+        row = {
+            "at": now.isoformat(timespec="seconds"),
+            "pad_step": round(pad_step, 3),
+            "ctrl_step": round(ctrl_step, 3),
+            "brightness": round(brightness, 1),
+            "light_jump": False,
+            "candidate": True,
+            "confirmed": True,
+            "floor_peak": 0.0,
+            "kind": "pad_held",
+        }
+        self.last_row = row
+        self._write(row)
+        self.confirmed_total += 1
+        log.info("watch: new dark patch on the pad since %s (%.2f), behind a floor change",
+                 held_at.isoformat(timespec="seconds"), dark)  # fmt: skip
+        return Candidate(
+            at=now,
+            before_at=held_at,
+            before_jpeg=held_jpeg,
+            after_jpeg=crop_jpeg,
+            pad_step=pad_step,
+            ctrl_step=ctrl_step,
+            norm=norm,
+            brightness=brightness,
+            before_norm=held_norm,
+            before_brightness=held_brightness,
+            lasting=True,
+            held=True,
+        )
 
     def _resolve_pending(
         self, norm: list[float], brightness: float, now: datetime, crop_jpeg: bytes

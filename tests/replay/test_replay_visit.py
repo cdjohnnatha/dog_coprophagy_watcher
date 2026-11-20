@@ -251,7 +251,8 @@ async def test_connecting_publishes_discovery_and_state(rig):
     await rig.service.on_connect()
     configs = [(t, r) for t, _, r in rig.published if t.startswith("homeassistant/")]
     # 25 = 20 + poop today, last poop, poop history, poop present and the poop photo (3.5.0)
-    assert len(configs) == 30 and all(retained for _, retained in configs)
+    # 36 = 30 + six pad close-ups of the review photos (3.10.4, ADR-0023)
+    assert len(configs) == 36 and all(retained for _, retained in configs)
     state = [(b, r) for t, b, r in rig.published if t == "ellie/state"][-1]
     assert state[1] is True and state[0]["pee_today"] == 0
     assert {

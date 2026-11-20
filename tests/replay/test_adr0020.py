@@ -148,6 +148,35 @@ async def test_no_question_while_the_last_pee_may_still_be_spreading(tmp_path, c
     assert visit["auto_outcome"] == "no_pee"
 
 
+async def test_a_big_pee_still_spreads_43_minutes_later_and_the_skip_is_logged(tmp_path, clock):
+    """2026-11-19 12:13 pee, 12:56 visit: 8.9 % new stain was the same pee spreading."""
+    rig = build(tmp_path, clock, [DOG, STAINED])
+    earlier = iso(clock() - timedelta(minutes=43))
+    rig.store.insert_visit(make_visit(id="v_20261029_113200", started_at=earlier, ended_at=earlier))
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.95))
+    await one_visit(rig)
+    visit = visits(rig)[-1]
+    assert visit["auto_outcome"] == "no_pee"
+    (line,) = (rig.evidence.root / "spread_skips.jsonl").read_text().splitlines()
+    row = json.loads(line)
+    assert row["visit_id"] == visit["id"] and row["last_pee_id"] == "v_20261029_113200"
+    assert 43 <= row["minutes_since_pee"] < 45 and row["stain_pct"] > 2
+    # the pad photo now shows the spread stain; the pee's own frame is untouched
+    pee_dir = rig.evidence.visit_dir("v_20261029_113200")
+    assert (pee_dir / "after_spread.jpg").read_bytes() == STAINED
+    await rig.service.minute_tasks()
+    assert topics(rig, "ellie/image/last_pee")[-1] == STAINED
+
+
+async def test_a_new_stain_an_hour_after_the_last_pee_is_asked(tmp_path, clock):
+    rig = build(tmp_path, clock, [DOG, STAINED])
+    earlier = iso(clock() - timedelta(minutes=65))
+    rig.store.insert_visit(make_visit(id="v_20261029_105500", started_at=earlier, ended_at=earlier))
+    rig.analyser.script(make_result(pee=False, pee_confidence=0.95))
+    await one_visit(rig)
+    assert visits(rig)[-1]["auto_outcome"] == "uncertain"
+
+
 async def test_a_watch_visit_gets_no_stain_opinion(tmp_path, clock):
     rig = build(tmp_path, clock, [STAINED])
     rig.analyser.script(make_result(pee=False, pee_confidence=0.95))
@@ -399,3 +428,87 @@ async def test_undoing_the_pad_change_drops_the_found_pees(tmp_path, clock):
     assert len(_found(rig)) == 2
     await rig.service.on_message("ellie/cmd/pad_undo", b"{}")
     assert _found(rig) == []
+
+
+# --- 2026-11-20: held frame after a person left, found pee photos, manual pee photo ---
+
+
+async def test_a_held_frame_change_after_the_person_left_opens_a_visit(tmp_path, clock):
+    """12:38 pee (Frigate saw no dog): the owner had left the tray at 12:34, the held frame is
+    from 12:37:50, so the presence cannot explain the new patch."""
+    rig = build(tmp_path, clock, [STAINED])
+    rig.analyser.script(make_result(pee=True, pee_confidence=0.9))
+    now = clock()
+    rig.store.insert_presence({"id": "s_1", "started_at": iso(now - timedelta(minutes=12)),
+                               "ended_at": iso(now - timedelta(minutes=8)),
+                               "state": "DECIDED"})  # fmt: skip
+    found = Candidate(at=now, before_at=now - timedelta(minutes=3), before_jpeg=CLEAN,
+                      after_jpeg=STAINED, pad_step=0.2, ctrl_step=0.02, norm=[], brightness=120,
+                      lasting=True, held=True)  # fmt: skip
+    await rig.service._open_watch_visit(found)
+    await rig.service.wait_idle()
+    (visit,) = visits(rig)
+    assert visit["final_outcome"] == "pee"
+
+
+async def test_a_lasting_non_held_change_after_activity_is_still_ignored(tmp_path, clock):
+    rig = build(tmp_path, clock, [STAINED])
+    now = clock()
+    rig.store.insert_presence({"id": "s_1", "started_at": iso(now - timedelta(minutes=12)),
+                               "ended_at": iso(now - timedelta(minutes=8)),
+                               "state": "DECIDED"})  # fmt: skip
+    found = Candidate(at=now, before_at=now - timedelta(minutes=3), before_jpeg=CLEAN,
+                      after_jpeg=STAINED, pad_step=0.2, ctrl_step=0.02, norm=[], brightness=120,
+                      lasting=True)  # fmt: skip
+    await rig.service._open_watch_visit(found)
+    assert visits(rig) == []
+
+
+async def test_a_found_pee_in_review_shows_the_frames_of_the_visit_that_found_it(tmp_path, clock):
+    rig = build(tmp_path, clock, [CLEAN])
+    at = iso(clock() - timedelta(minutes=5))
+    finder = make_visit(id="v_20261029_115500", started_at=at, ended_at=at, final_outcome="no_pee")
+    rig.store.insert_visit(finder)
+    folder = rig.evidence.visit_dir(finder["id"])
+    rig.evidence.write(folder / "before.jpg", CLEAN)
+    rig.evidence.write(folder / "after.jpg", STAINED)
+    found_at = iso(clock() - timedelta(minutes=20))
+    rig.store.insert_visit(make_visit(id="v_20261029_114000", started_at=found_at,
+                                      ended_at=found_at, needs_review=True,
+                                      found_by=finder["id"]))  # fmt: skip
+    await rig.service.publish_state()
+    assert topics(rig, "ellie/image/review_after")[-1] == STAINED
+    assert topics(rig, "ellie/image/review_before")[-1] == CLEAN
+
+
+async def test_a_manual_pee_shows_the_pad_seen_after_it(tmp_path, clock):
+    rig = build(tmp_path, clock, [CLEAN])
+    at = iso(clock() - timedelta(minutes=2))
+    rig.store.insert_visit(make_visit(id="v_20261029_115800", source="manual", started_at=at,
+                                      ended_at=at))  # fmt: skip
+    rig.reference.update(STAINED)  # the camera's clear-area frame, taken now
+    await rig.service.publish_state()
+    assert topics(rig, "ellie/image/last_pee")[-1] == STAINED
+
+
+async def test_gemini_gets_the_pad_history(tmp_path, clock):
+    """Owner, 2026-11-20: the pad's own story in the written CONTEXT (pees, poops, people)."""
+    rig = build(tmp_path, clock, [DOG, CLEAN])
+    now = clock()
+    rig.store.insert_pad_change({"id": "p_1", "at": iso(now - timedelta(hours=5)),
+                                 "source": "detected"})  # fmt: skip
+    t1, t2 = iso(now - timedelta(hours=4)), iso(now - timedelta(hours=2))
+    rig.store.insert_visit(make_visit(id="v_20261029_080000", source="manual", started_at=t1,
+                                      ended_at=t1))  # fmt: skip
+    rig.store.insert_visit(make_visit(id="v_20261029_100000", started_at=t2, ended_at=t2,
+                                      final_poop="poop", poop_observed="on_pad"))  # fmt: skip
+    p1, p2 = iso(now - timedelta(minutes=30)), iso(now - timedelta(minutes=27))
+    rig.store.insert_presence({"id": "s_20261029_113000", "started_at": p1, "ended_at": p2,
+                               "state": "DECIDED"})  # fmt: skip
+    await one_visit(rig)
+    (context,) = rig.analyser.contexts
+    assert "2 pee(s) were counted on this pad before BEFORE" in context
+    assert "added by the owner" in context and "seen by the camera" in context
+    assert "A poop on the pad was counted" in context and "not removed yet" in context
+    assert "A person was at the tray after that" in context
+    assert "last counted pee was 120 minutes before BEFORE" in context

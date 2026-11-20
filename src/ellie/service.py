@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from ellie import discovery
+from ellie import discovery, review_images
 from ellie.analysers.base import Analyser, AnalyserError
 from ellie.census import FOUND_PEE_REASON, found_pee_times, is_found_pee, missing_pees
 from ellie.counting import LOCAL_TZ, Counting, local_date
@@ -47,7 +47,12 @@ WATCH_EXPLAIN_S = 180  # a visit or presence this close to a candidate already e
 # 03:46 settle within 5 min) and Ellie never pees twice in a short time (shortest gap between two
 # real pees in 45: 84 min). So growth within SPREAD_MIN of a pee is that pee; later it is a new one
 # (ADR-0020). SAME_PEE is the window in which two entries are one and the same pee or poop.
-SPREAD_MIN = timedelta(minutes=15)
+# 2026-11-19: a big pee was still spreading 43 min later (12:13 → 12:56, owner asked for nothing);
+# shortest gap between real pees in 52 is 87 min, so the window is 60 min (ADR-0020 amendment).
+# Every skipped question is logged to SPREAD_LOG to check the number against the owner's list.
+SPREAD_MIN = timedelta(minutes=60)
+SPREAD_LOG = "spread_skips.jsonl"
+SPREAD_PHOTO = "after_spread.jpg"  # the latest frame of a pee that kept spreading (display only)
 SAME_EVENT = timedelta(minutes=30)
 FOUND_MATCH = timedelta(hours=6)  # a manual pee takes over a found pee of the same pad this close
 CAMERA_ALERT_AFTER = timedelta(minutes=15)  # go2rtc failing this long: tell the owner
@@ -89,6 +94,22 @@ FIXABLE = {
         "Confira a chave nas opções do app.",
     ),
 }
+
+
+DOUBT_PHOTOS = ("before", "after", "both", "none")
+DOUBT_REASONS = ("glare", "old_stain", "other")
+
+
+def _doubt(data: dict) -> dict | None:
+    """`doubt: {photos, reason}` of a label command (owner answered unsure), else None."""
+    doubt = data.get("doubt")
+    if not isinstance(doubt, dict):
+        return None
+    photos, reason = doubt.get("photos") or "none", doubt.get("reason") or "other"
+    if photos not in DOUBT_PHOTOS or reason not in DOUBT_REASONS:
+        log.warning("label: ignored an invalid doubt %r", doubt)
+        return None
+    return {"photos": photos, "reason": reason}
 
 
 def _placeholder_jpeg() -> bytes:
@@ -170,6 +191,7 @@ class Service(PadsMixin):
         self._poop_asked: set[str] = set()  # visits whose poop question was already sent
         self._presence_retakes: dict[str, int] = {}  # occluded presences: retakes done so far
         self._pad_full_sent: set[str] = set()  # visits whose "pad full" notice went out
+        self._presence_chain: tuple[bytes, datetime] | None = None  # before + end of last presence
         self._census_lock = asyncio.Lock()
         self._person_checks: dict[str, Any] = {}  # visit id -> pad answer for the person after her
 
@@ -204,6 +226,9 @@ class Service(PadsMixin):
                 presence_actions += more
             event_id = self._dog_event_id(payload)
             actions += self.tracker.on_event(event_id, now) if event_id else []
+            held = self._person_event(payload)
+            if held is not None:
+                presence_actions += self.presence.on_person_event(*held, now)
         elif topic == "frigate/available":
             actions = self.tracker.on_frigate_available(
                 payload.decode(errors="replace").strip() == "online", now
@@ -330,7 +355,7 @@ class Service(PadsMixin):
         if kind == "poop":  # a poop answer never touches the pee outcome (ADR-0014)
             await self._apply_poop_label(visit, label, channel, self._by(data))
         else:
-            await self._apply_label(visit, label, channel, self._by(data))
+            await self._apply_label(visit, label, channel, self._by(data), _doubt(data))
 
     def _manual_time(self, command: str, data: dict) -> datetime | None:
         """The time of a manual entry (local if it has no zone); None, with a log, if unusable."""
@@ -454,6 +479,7 @@ class Service(PadsMixin):
             log.warning("manual_poop at %s: the poop of %s is already counted, not added",
                         iso(at), same["id"])  # fmt: skip
             return
+        walk = data.get("where") == "walk"  # seen on a walk: counted, but nothing at the tray
         where = data.get("where") if data.get("where") in ("on_pad", "beside_tray") else "none"
         visit_id = self._manual_visit_id(at)
         self.store.insert_visit(
@@ -472,7 +498,8 @@ class Service(PadsMixin):
                 "poop_cleared_at": iso(at),
                 "poop_cleared_by": "owner",
                 "poop_observed": where,
-                "reason": "cocô adicionado manualmente",
+                "reason": "cocô no passeio" if walk else "cocô adicionado manualmente",
+                "poop_walk": walk,
                 "needs_review": False,
             }
         )
@@ -500,7 +527,14 @@ class Service(PadsMixin):
         ):
             log.info("watch: a visit or presence already explains the change, no new visit")
             return
-        if found.lasting and self._recent_activity(found.before_at - LASTING_QUIET):
+        # A held frame was taken after the activity window checked above, so a person who left
+        # before it cannot explain the change (2026-11-20 12:38 pee and 12:45 poop, Frigate saw
+        # no dog, dropped here because the owner had been at the tray at 12:30-12:34).
+        if (
+            found.lasting
+            and not found.held
+            and self._recent_activity(found.before_at - LASTING_QUIET)
+        ):
             # a tray lifted, cleaned and put back, or a puddle drying, also leaves a lasting change
             # (2026-11-09 12:59, 13:17, 13:28): only a quiet tray may confirm this way
             log.info("watch: lasting change right after activity at the tray, no new visit")
@@ -582,12 +616,17 @@ class Service(PadsMixin):
         else:  # already decided or labelled: record the new answer, change nothing else
             self._spawn(self._rerun(visit["id"], data.get("analyser")))
 
-    async def _apply_label(self, visit: dict, label: str, channel: str, by: str | None) -> None:
+    async def _apply_label(
+        self, visit: dict, label: str, channel: str, by: str | None, doubt: dict | None = None
+    ) -> None:
         visit_id = visit["id"]
         if visit["state"] not in ("DECIDED", "LABELLED"):
             log.warning("label for %s ignored: the visit is still %s", visit_id, visit["state"])
             return
-        self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"])
+        self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"], doubt=doubt)
+        if doubt:
+            log.info("visit %s: answered %s in doubt (photos %s, %s)", visit_id, label,
+                     doubt["photos"], doubt["reason"])  # fmt: skip
         self.store.update_visit(visit_id, final_outcome=label, needs_review=False, state="LABELLED")
         if label == "pee" and visit["final_outcome"] != "pee" and not is_found_pee(visit):
             await self._absorb_found_pee(visit)
@@ -595,7 +634,7 @@ class Service(PadsMixin):
         analyses = self.store.analyses_for(visit_id)
         night = ((analyses[-1]["result"] or {}).get("night_mode")) if analyses else None
         try:
-            self.evidence.export_dataset(visit, label, night=night)
+            self.evidence.export_dataset(visit, label, night=night, doubt=doubt)
         except OSError:
             log.exception("dataset export failed for %s", visit_id)
         await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)
@@ -784,6 +823,7 @@ class Service(PadsMixin):
             await self.publish_state()
 
     def _insert_started(self, visit: dict) -> None:
+        self._presence_chain = None  # a dog visit between two presences breaks the chain
         started = datetime.fromisoformat(visit["started_at"])
         reference = self.reference.before(started)
         age = int((started - reference[1]).total_seconds()) if reference else None
@@ -834,15 +874,51 @@ class Service(PadsMixin):
         return max((c for c in changes if c["at"] <= stamp), key=lambda c: c["at"], default=None)
 
     def _pee_context(self, visit: dict | None) -> str | None:
-        """CONTEXT for the pee prompt (pee_v5): pad age and minutes from the last pee to BEFORE."""
+        """CONTEXT for the pee prompt: the history of the pad up to BEFORE (pee_v5, pee_v6).
+
+        Pad age, every pee and poop counted on this pad (time, how it was counted), poops not
+        cleared yet, people at the tray since the last event, and the minutes from the last pee
+        to BEFORE. Written facts only: Gemini still judges the images (owner, 2026-11-20).
+        """
         if not visit:
             return None
         before_at = self._before_at(visit)
+        before_iso = iso(before_at)
+        hhmm = lambda at: (local_text(at) or "")[11:16]
         parts = []
         change = self._pad_change_for(visit["started_at"])
         if change:
             hours = (before_at - datetime.fromisoformat(change["at"])).total_seconds() / 3600
-            parts.append(f"The pad was put in {max(hours, 0):.1f} hours before BEFORE.")
+            parts.append(
+                f"The pad was put in {max(hours, 0):.1f} hours before BEFORE (at {hhmm(change['at'])})."
+            )
+        start = change["at"] if change else iso(before_at - timedelta(days=1))
+        earlier = [
+            v for v in self.store.visits_started_between(start, before_iso)
+            if v["id"] != visit["id"]
+        ]  # fmt: skip
+        pees = [v for v in earlier if v.get("final_outcome") == "pee"]
+        how = {"manual": "added by the owner"}
+        if pees:
+            listed = ", ".join(
+                f"{hhmm(p['started_at'])} ({how.get(p.get('source'), 'found by a stain count' if p.get('found_by') else 'seen by the camera')})"
+                for p in pees
+            )
+            parts.append(
+                f"{len(pees)} pee(s) were counted on this pad before BEFORE: {listed}. Their marks "
+                "are old; they may have merged into fewer stains."
+            )
+        poops = [v for v in earlier if v.get("final_poop") == "poop"]
+        for p in poops:
+            where = {"on_pad": "on the pad", "beside_tray": "beside the tray"}.get(
+                p.get("poop_observed"), "near the tray"
+            )
+            state = (
+                f"removed at {hhmm(p['poop_cleared_at'])}"
+                if p.get("poop_cleared_at")
+                else "not removed yet (it is old if you see it in BEFORE)"
+            )
+            parts.append(f"A poop {where} was counted at {hhmm(p['started_at'])}, {state}.")
         last = self._last_pee_before(visit)
         if last is None or (change and last["started_at"] < change["at"]):
             parts.append("No pee was counted on this pad yet.")
@@ -853,6 +929,14 @@ class Service(PadsMixin):
                 parts.append("The last counted pee came after BEFORE was taken.")
             else:
                 parts.append(f"The last counted pee was {minutes:.0f} minutes before BEFORE.")
+        since = last["started_at"] if last is not None and last["started_at"] > start else start
+        people = self.store.presences_between(since, before_iso)
+        if people:
+            times = ", ".join(f"{hhmm(p['started_at'])}-{hhmm(p['ended_at'])}" for p in people[-3:])
+            parts.append(
+                f"A person was at the tray after that ({times}) and did not change the pad: the "
+                "tray may have been moved or cleaned of poop."
+            )
         return " ".join(parts)
 
     def _second_pee_opinion(
@@ -860,8 +944,8 @@ class Service(PadsMixin):
     ) -> float | None:
         """Gemini saw no pee, but a new stain covers part of the pad: the stained share, else None.
 
-        Not used when a pee came less than SPREAD_MIN before the BEFORE frame: that stain may
-        still be spreading (ADR-0020).
+        Not used when a pee came less than SPREAD_MIN (60 min) before the BEFORE frame: that stain
+        may still be spreading (ADR-0020); the skip is logged to SPREAD_LOG.
         """
         try:
             stain = pee_stain(before_path.read_bytes(), after_path.read_bytes())
@@ -872,13 +956,48 @@ class Service(PadsMixin):
         last = self._last_pee_before(visit)
         if last is not None:
             last_at = datetime.fromisoformat(last["ended_at"] or last["started_at"])
-            if self._before_at(visit) - last_at < SPREAD_MIN:
-                log.info("visit %s: new stain on %.0f%% of the pad, but the pee of %s may still "
-                         "be spreading", visit_id, stain * 100, last["id"])  # fmt: skip
+            since = self._before_at(visit) - last_at
+            if since < SPREAD_MIN:
+                log.info("visit %s: new stain on %.0f%% of the pad, but the pee of %s (%.0f min "
+                         "before) may still be spreading", visit_id, stain * 100, last["id"],
+                         since.total_seconds() / 60)  # fmt: skip
+                self._log_spread_skip(visit_id, last["id"], since, stain)
+                self._keep_spread_photo(last["id"], after_path)
                 return None
         log.info("visit %s: Gemini saw no pee but %.1f%% of the pad has a new stain, asking the "
                  "owner", visit_id, stain * 100)  # fmt: skip
         return stain
+
+    def _keep_spread_photo(self, pee_id: str, after_path) -> None:
+        """Show the spread stain as the pee's pad photo (owner, 2026-11-19).
+
+        Copied to SPREAD_PHOTO next to the pee's own frames; after.jpg stays untouched (Gemini,
+        labels and the dataset use it).
+        """
+        try:
+            folder = self.evidence.visit_dir(pee_id)
+            folder.mkdir(parents=True, exist_ok=True)  # a manual pee has no folder yet
+            target = folder / SPREAD_PHOTO
+            tmp = target.with_suffix(".tmp")
+            tmp.write_bytes(after_path.read_bytes())
+            tmp.replace(target)
+        except (OSError, ValueError):  # ValueError: malformed id
+            log.warning("could not keep the spread photo of %s", pee_id)
+
+    def _log_spread_skip(self, visit_id: str, pee_id: str, since: timedelta, stain: float) -> None:
+        """One JSON line per question not asked because the last pee may still be spreading."""
+        row = {
+            "at": iso(self._clock()),
+            "visit_id": visit_id,
+            "last_pee_id": pee_id,
+            "minutes_since_pee": round(since.total_seconds() / 60, 1),
+            "stain_pct": round(stain * 100, 1),
+        }
+        try:
+            with (self.evidence.root / SPREAD_LOG).open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except OSError:
+            log.warning("could not write %s", SPREAD_LOG)
 
     async def _census(self, visit: dict, result) -> None:
         """More separate stains on the pad than pees counted on it: count the missing ones."""
@@ -1286,14 +1405,16 @@ class Service(PadsMixin):
             topics["review_after"]: (current and current["visit_id"], "after.jpg"),
         }
         for topic, (visit_id, name) in wanted.items():
-            path = self.evidence.visit_dir(visit_id) / name if visit_id else None
             if not visit_id or self._image_keys.get(topic) == visit_id:
                 continue
-            if path is None or not path.exists():
-                continue
-            sent = await self._publish(topic, path.read_bytes(), True)
+            path = self._photo_dir(visit_id) / name
+            # never leave the photos of an older visit on screen (2026-11-20 07:41 found pee
+            # showed the pad before the change): placeholder when there is no photo at all
+            body = path.read_bytes() if path.exists() else _placeholder_jpeg()
+            sent = await self._publish(topic, body, True)
             if sent is not False:  # a dropped publish (no MQTT connection yet) must be retried
                 self._image_keys[topic] = visit_id
+        await self._publish_review_closeups(current and current["visit_id"])
         top = self._top_photo(last)
         top_topic = topics["last_pee_photo"]
         if (
@@ -1323,8 +1444,48 @@ class Service(PadsMixin):
         ):
             self._image_keys[pad_topic] = str(pad_path)
 
+    def _photo_dir(self, visit_id: str):
+        """Folder with the BEFORE/AFTER to show for a visit: its own, else the visit that found it.
+
+        A pee found by the stain census has no frames; the frames of the visit that found it
+        show the stain. Falls back to the visit's own (possibly empty) folder.
+        """
+        own = self.evidence.visit_dir(visit_id)
+        if (own / "after.jpg").exists() or (own / "before.jpg").exists():
+            return own
+        visit = self.store.get_visit(visit_id)
+        finder = visit.get("found_by") if visit else None
+        if finder:
+            try:
+                return self.evidence.visit_dir(finder)
+            except ValueError:
+                pass
+        return own
+
+    async def _publish_review_closeups(self, visit_id: str | None) -> None:
+        """Pad close-ups of the review photos (ADR-0023): written once, sent when the head changes.
+
+        A view that does not exist (infrared frame, missing photo) gets the flat placeholder, so
+        the popup never shows the close-up of an older visit.
+        """
+        topics = discovery.IMAGE_TOPICS
+        keys = [k for k in topics if k.startswith("review_") and k.count("_") == 2]
+        if not visit_id or all(self._image_keys.get(topics[k]) == visit_id for k in keys):
+            return
+        paths = await asyncio.to_thread(review_images.write_variants, self._photo_dir(visit_id))
+        for key in keys:
+            topic = topics[key]
+            if self._image_keys.get(topic) == visit_id:
+                continue
+            path = paths.get(key.removeprefix("review_"))
+            body = path.read_bytes() if path is not None else _placeholder_jpeg()
+            if await self._publish(topic, body, True) is not False:
+                self._image_keys[topic] = visit_id
+
     def _top_photo(self, last: dict | None) -> tuple[str, bytes] | None:
         """(key, jpeg) for the big "Foto do tapete": the latest of the last pee and a pad change.
+
+        A pee that kept spreading shows its latest spread frame (SPREAD_PHOTO).
 
         After a pad change the clean pad replaces the stained photo until the next pee. A manual
         mark has no photo, so it waits for a reference frame taken after the mark (the owner may
@@ -1343,10 +1504,19 @@ class Service(PadsMixin):
                 return f"pad:{change['id']}", reference[0]
             return None  # keep what is shown; the next minute's reference will do
         if last is not None:
-            path = self.evidence.visit_dir(last["visit_id"]) / "after.jpg"
+            folder = self.evidence.visit_dir(last["visit_id"])
+            spread = folder / SPREAD_PHOTO  # the same pee, photographed after it spread
+            if spread.exists():
+                return f"{last['visit_id']}:{spread.stat().st_mtime_ns}", spread.read_bytes()
+            path = self._photo_dir(last["visit_id"]) / "after.jpg"
             if path.exists():
                 return last["visit_id"], path.read_bytes()
-        return "placeholder", _placeholder_jpeg()  # a manual or undone pee has no photo
+            # a manual pee has no photo: show the pad as the camera saw it after the pee
+            # (2026-11-20 07:41 manual pee kept the placeholder)
+            reference = self.reference.latest()
+            if reference is not None and reference[1] >= datetime.fromisoformat(last["at"]):
+                return f"{last['visit_id']}:ref", reference[0]
+        return "placeholder", _placeholder_jpeg()  # no photo yet
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
         return await self._publish_fn(topic, payload, retain)
@@ -1385,6 +1555,24 @@ class Service(PadsMixin):
             actions += self.tracker.on_tray_dog(counts["dog"], now)
             presence += self.presence.on_dog_area(counts["dog"], now)
         return actions, presence
+
+    def _person_event(self, payload: bytes) -> tuple[str, bool] | None:
+        """(event id, still going) of a real person who entered tray_area; None otherwise."""
+        try:
+            message = json.loads(payload) or {}
+            after = message.get("after") or {}
+            if after.get("camera") != self.camera or after.get("label") != "person":
+                return None
+            event_id = after.get("id")
+            if not isinstance(event_id, str):
+                return None
+            if message.get("type") == "end" or after.get("end_time"):
+                return event_id, False
+            if "tray_area" not in set(after.get("entered_zones") or []):
+                return None
+        except (ValueError, AttributeError, TypeError):
+            return None
+        return (event_id, True) if self.small_person.is_big(event_id) else None
 
     def _dog_event_id(self, payload: bytes) -> str | None:
         try:

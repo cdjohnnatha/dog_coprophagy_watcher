@@ -379,3 +379,60 @@ def test_a_floor_candidate_that_leaves_nothing_on_the_pad_is_still_dropped() -> 
     for _ in range(PENDING_TTL_S // 60 + 1):
         assert minute(w, clock, clean) is None
     assert w.confirmed_total == 0
+
+
+# --- ADR-0022: the floor changes with steady light (the bath mat moved), the pad is held ---
+
+
+def moved_mat(jpeg: bytes) -> bytes:
+    """A light object moved on the floor beside the pad: the floor changes, the light does not."""
+    img = Image.open(io.BytesIO(jpeg))
+    px = img.load()
+    for y in range(140, 195):
+        for x in range(5, 45):
+            px[x, y] = 250
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def test_a_poop_behind_a_floor_change_is_confirmed_once_the_floor_is_quiet(tmp_path) -> None:
+    """2026-11-18 11:59: Ellie in a sweater, no Frigate dog, the mat moved in the same minute."""
+    w, clock = watch(tmp_path)
+    before = frame()
+    w.observe(before)
+    minute(w, clock, frame())
+    after = moved_mat(frame(pad=60))
+    assert minute(w, clock, after) is None  # floor moving: held, not taken for light and dropped
+    assert w.last_row["ctrl_step"] > 0.10 and not w.last_row["light_jump"]
+    found = minute(w, clock, after)  # the floor is quiet again
+    assert found is not None and found.lasting and found.kind == "pad"
+    assert found.before_jpeg == frame() and found.after_jpeg == after
+    assert w.last_row["kind"] == "pad_held"
+    assert "pad_held" in (tmp_path / "w" / "watch.csv").read_text()
+
+
+def test_a_floor_change_with_nothing_new_on_the_pad_is_forgotten() -> None:
+    w, clock = watch()
+    w.observe(frame())
+    moved = moved_mat(frame())
+    assert minute(w, clock, moved) is None
+    assert minute(w, clock, moved) is None
+    assert w._held is None
+
+
+def test_a_held_frame_is_given_up_after_its_time() -> None:
+    w, clock = watch()
+    w.observe(frame())
+    assert minute(w, clock, moved_mat(frame(pad=60))) is None
+    clock.advance(1000)
+    assert w.observe(moved_mat(frame(pad=60))) is None
+    assert w._held is None
+
+
+def test_a_visit_forgets_the_held_frame() -> None:
+    w, clock = watch()
+    w.observe(frame())
+    minute(w, clock, moved_mat(frame(pad=60)))
+    w.rebase(moved_mat(frame(pad=60)))
+    assert w._held is None

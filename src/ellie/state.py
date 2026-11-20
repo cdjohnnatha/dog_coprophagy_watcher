@@ -39,7 +39,9 @@ def _poop_view(evidence: Evidence, visit: dict | None) -> dict | None:
     return {
         "at": visit["started_at"],
         "visit_id": visit["id"],
-        "where": visit["poop_observed"]
+        "where": "walk"
+        if visit.get("poop_walk")
+        else visit["poop_observed"]
         if visit["poop_observed"] in ("on_pad", "beside_tray")
         else None,
         "image": _url_if_exists(evidence, visit["id"], "after.jpg"),

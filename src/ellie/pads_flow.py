@@ -32,6 +32,11 @@ PADS_AVERAGED = 5  # finished pads in the "pees per pad" average
 PAD_CHANGE_MERGE = timedelta(
     minutes=10
 )  # a second change this close to the current one is the same
+# A presence that starts this soon after the previous one ended is the same cleanup, so it keeps
+# that one's "before" (2026-11-17 22:28: the frame in between showed the tray turned over, the
+# pad change was asked and never answered). A dog visit or a recorded pad change breaks the chain.
+PRESENCE_CHAIN = timedelta(minutes=10)
+LAST_PRESENCE_MAX = timedelta(hours=12)  # "Troquei na última limpeza" looks back this far
 PAD_REASONS = {
     "no_reference": "faltou a foto de antes do tabuleiro",
     "frame_error": "não consegui pegar a imagem da câmera",
@@ -53,6 +58,7 @@ class PadsMixin:
         due = at + timedelta(days=self.cfg["pad_change_days"])
         photo, image_at = self.pad_photo()
         history = self._pad_history()
+        last_presence = self._last_presence()
         return {
             "changed_at": change["at"],
             "due_at": iso(due),
@@ -63,6 +69,9 @@ class PadsMixin:
             "pad_color": change["pad_color"],
             "image": self.evidence.local_url(photo) if photo else None,
             "history": history,
+            # for "Troquei na última limpeza": when a person was last at the tray, if after the
+            # current change
+            "last_presence_at": last_presence["ended_at"] if last_presence else None,
             **self._pad_averages(history),
         }
 
@@ -196,17 +205,39 @@ class PadsMixin:
                 self.store.insert_presence(
                     {"id": presence_id, "started_at": row["started_at"], "state": "PRESENT"}
                 )
-                reference = self.reference.before(datetime.fromisoformat(row["started_at"]))
-                if reference:
-                    self.evidence.write(directory / "before.jpg", reference[0])
+                started = datetime.fromisoformat(row["started_at"])
+                reference = self.reference.before(started)
+                before = reference[0] if reference else None
+                chain = self._presence_chain
+                if chain is not None and started - chain[1] <= PRESENCE_CHAIN:
+                    # one cleanup in two steps: the frame in between shows the tray half done
+                    log.info("presence %s continues the one that ended at %s: same before",
+                             presence_id, iso(chain[1]))  # fmt: skip
+                    before = chain[0]
+                if before is not None:
+                    self.evidence.write(directory / "before.jpg", before)
+                    self._presence_chain = (before, started)
             elif action.kind == "dropped":
                 self.store.update_presence(
                     presence_id, ended_at=row["ended_at"], state="DECIDED", reason=action.reason
                 )
                 shutil.rmtree(directory, ignore_errors=True)  # nothing worth keeping
+                if action.reason == "dog_visit":
+                    self._presence_chain = None  # Ellie may have changed the pad since
+                else:
+                    self._extend_presence_chain(row)
             else:
+                self._extend_presence_chain(row)
                 self.store.update_presence(presence_id, ended_at=row["ended_at"], state="ANALYSING")
                 self._spawn(self._analyse_presence(presence_id))
+
+    def _extend_presence_chain(self, row: dict) -> None:
+        """A presence ended: the next one within `PRESENCE_CHAIN` keeps its "before" (ADR-0021)."""
+        if self._presence_chain is not None and row.get("ended_at"):
+            self._presence_chain = (
+                self._presence_chain[0],
+                datetime.fromisoformat(row["ended_at"]),
+            )
 
     async def _analyse_presence(self, presence_id: str, retry: bool = False) -> None:
         if presence_id in self._inflight:
@@ -500,6 +531,7 @@ class PadsMixin:
             }
         )
         log.info("pad change %s at %s (%s)", change_id, at, source)
+        self._presence_chain = None  # the next presence starts from the new pad
         message = {
             "pad_change_id": change_id,
             "at": at,
@@ -539,7 +571,14 @@ class PadsMixin:
         await self.publish_state()
 
     async def _cmd_pad_changed(self, data: dict) -> None:
-        """`ellie/cmd/pad_changed`: "Troquei agora" / "Já troquei"."""
+        """`ellie/cmd/pad_changed`: "Troquei agora" / "Já troquei".
+
+        `last_presence: true` = "Troquei na última limpeza": the change happened at the last time
+        a person was at the tray (ADR-0021). Marking it "now" later would put the pees taken
+        since then on the old pad, and the stain census would count them again on the new one.
+        """
+        if data.get("last_presence"):
+            return await self._pad_changed_at_last_presence()
         raw = data.get("at")
         try:
             at = datetime.fromisoformat(str(raw)) if raw else self._clock()
@@ -559,6 +598,24 @@ class PadsMixin:
         if current and stamp < current["at"]:
             log.info("pad_changed: older than the current change, it will not become current")
         await self._record_pad_change("manual", stamp)
+
+    def _last_presence(self) -> dict | None:
+        """The last person at the tray after the current pad change (12 h at most)."""
+        current = self.store.current_pad_change()
+        since = iso(self._clock() - LAST_PRESENCE_MAX)
+        if current is not None and current["at"] > since:
+            since = current["at"]
+        return self.store.last_presence(since)
+
+    async def _pad_changed_at_last_presence(self) -> None:
+        presence = self._last_presence()
+        if presence is None:
+            log.warning("pad_changed: no person at the tray since the current change, not marked")
+            return
+        if presence["final_outcome"] is None:  # still asked: this is the answer
+            return await self._cmd_pad_label({"presence_id": presence["id"], "label": "replaced"})
+        self.store.update_presence(presence["id"], final_outcome="replaced", needs_review=False)
+        await self._record_pad_change("manual", presence["ended_at"], presence_id=presence["id"])
 
     async def _cmd_pad_undo(self, data: dict) -> None:
         """`ellie/cmd/pad_undo`: "Não troquei"; the previous change becomes current again."""

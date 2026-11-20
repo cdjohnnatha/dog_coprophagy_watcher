@@ -5,7 +5,7 @@ Contract for the single JSON object published (retained) on ``ellie/state``::
     pee_today: int, visits_today: int, uncertain_open: int, at_tray: bool,
     last_pee: null | {at: ISO-8601 UTC, visit_id, image, reason},
     poop_today: int, poops_by_day: [{date, poops}] (90 days, oldest first),
-    last_poop: null | {at, visit_id, where: on_pad|beside_tray|null, image, reason,
+    last_poop: null | {at, visit_id, where: on_pad|beside_tray|walk|null, image, reason,
                        cleared_at | null, cleared_by | null},
     poop_present: {on: bool, count: int, since: ISO-8601 UTC | null, visit_id | null,
                    where | null, image | null},
@@ -50,6 +50,12 @@ IMAGE_TOPICS = {
     "last_pee_photo": "ellie/image/last_pee",
     "review_before": "ellie/image/review_before",
     "review_after": "ellie/image/review_after",
+    # pad close-ups of the review photos, shown on tap (ADR-0023)
+    **{
+        f"review_{frame}_{kind}": f"ellie/image/review_{frame}_{kind}"
+        for frame in ("before", "after")
+        for kind in ("pad", "enh", "yellow")
+    },
     "pad_photo": "ellie/image/pad",
     "poop_photo": "ellie/image/poop",
 }
@@ -459,6 +465,12 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                 ("last_pee_photo", "Foto do tapete"),
                 ("review_before", "Revisão: foto antes"),
                 ("review_after", "Revisão: foto depois"),
+                ("review_before_pad", "Revisão: antes, tapete"),
+                ("review_before_enh", "Revisão: antes, realçada"),
+                ("review_before_yellow", "Revisão: antes, mapa de amarelo"),
+                ("review_after_pad", "Revisão: depois, tapete"),
+                ("review_after_enh", "Revisão: depois, realçada"),
+                ("review_after_yellow", "Revisão: depois, mapa de amarelo"),
                 ("pad_photo", "Foto da troca do tapete"),
                 ("poop_photo", "Foto do cocô"),
             )
@@ -479,7 +491,7 @@ def discovery_messages(version: str, analysers: Sequence[str]) -> list[tuple[str
             "name": extra["name"],
             "unique_id": unique_id,
             "default_entity_id": f"{component}.ellie_{obj}",
-            "device": DEVICE,
+            "device": {**DEVICE, "sw_version": version} if version else DEVICE,
             "origin": {"name": "Ellie", "sw_version": version},
             "availability_topic": STATUS_TOPIC,
         }

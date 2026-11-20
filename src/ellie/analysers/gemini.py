@@ -24,7 +24,7 @@ from ellie.analysers.base import AnalyserError, AnalysisResult, PadChangeResult
 log = logging.getLogger(__name__)
 
 ANALYSER_ID = "gemini:pee_v1"
-PAD_ANALYSER_ID = "gemini:pad_change_v1"
+PAD_ANALYSER_ID = "gemini:pad_change_v2"
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 DEFAULT_RETRY_DELAYS = (15.0, 60.0, 180.0)
 
@@ -136,7 +136,7 @@ class GeminiAnalyser:
         self.id = f"gemini:{pee_prompt}{suffix}"  # one analyser per prompt/thinking, comparable
         self._pee_prompt = load_prompt(pee_prompt)
         self._uses_context = "CONTEXT" in self._pee_prompt  # pee_v5 and later
-        self._pad_prompt = load_prompt("pad_change_v1")
+        self._pad_prompt = load_prompt("pad_change_v2")
         self.last_model: str | None = None
         self.last_usage: dict[str, int] = {"in": 0, "out": 0}
 

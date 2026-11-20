@@ -67,6 +67,7 @@ class Evidence:
         label: str,
         night: bool | None = None,
         now: datetime | None = None,
+        doubt: dict | None = None,
     ) -> list[str]:
         """Copy a visit's images into dataset/<label>/<visit_id>/ and log the label."""
         if label not in ("pee", "no_pee"):
@@ -91,6 +92,8 @@ class Evidence:
             "labelled_at": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "files": files,
         }
+        if doubt:  # the owner was not sure: which photos were bad and why (reviewed apart)
+            record["doubt"] = doubt
         dataset.mkdir(parents=True, exist_ok=True)
         with (dataset / "labels.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")

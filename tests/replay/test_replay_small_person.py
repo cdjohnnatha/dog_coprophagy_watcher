@@ -51,3 +51,23 @@ async def test_a_real_person_at_the_tray_is_still_a_presence(rig):
     await advance(rig, 20)
     assert rig.service.tracker.active is None
     assert rig.service.presence.present
+
+
+async def test_a_cleanup_mostly_outside_the_zone_is_still_analysed(rig):
+    """2026-11-18 12:14: the owner's box was in tray_area 2 s of an 18 s event (ADR-0022)."""
+    from helpers import make_pad_result
+
+    rig.analyser.script_pad(make_pad_result(pad_replaced=False, poop_removed=True))
+    await rig.service.tick()
+    await event(rig, OWNER, "new")
+    await send(rig, "frigate/tray_area/person", 1)
+    await advance(rig, 2)
+    await send(rig, "frigate/tray_area/person", 0)
+    await advance(rig, 16)
+    assert rig.service.presence.present
+    await event(rig, {**OWNER, "current_zones": [], "end_time": 1794300130.0}, "end")
+    await advance(rig, 45)
+    await rig.service.wait_idle()
+    rows = rig.store._db.execute("SELECT id, reason, final_outcome FROM presences").fetchall()
+    assert len(rows) == 1 and rows[0]["reason"] != "too_short"
+    assert rig.analyser.pad_calls  # the cleanup was analysed (its poop can be found)

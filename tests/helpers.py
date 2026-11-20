@@ -167,6 +167,7 @@ def make_visit(**overrides: Any) -> dict:
         "pee_where": None,
         "found_by": None,
         "found_from": None,
+        "poop_walk": False,
     }
     return {**base, **overrides}
 

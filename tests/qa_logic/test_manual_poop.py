@@ -45,3 +45,19 @@ async def test_a_bad_time_or_place_is_ignored_or_defaulted(make_rig):
     await send(rig, "ellie/cmd/manual_poop", {"at": "2026-10-29 10:00:00", "where": []})
     (visit,) = rig.store.visits_started_between("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z")
     assert visit["poop_observed"] == "none"
+
+
+async def test_a_poop_on_a_walk_is_counted_and_says_so(make_rig):
+    """ADR-0021: the owner saw a poop on a walk; it resets the hours without a poop."""
+    rig = make_rig()
+    local = rig.clock().astimezone(LOCAL_TZ)
+    await send(rig, "ellie/cmd/manual_poop",
+               {"at": local.strftime("%Y-%m-%d %H:%M:%S"), "where": "walk"})  # fmt: skip
+    await tick_for(rig, 1)
+    st = state(rig)
+    assert st["poop_today"] == 1 and st["poop_present"]["on"] is False
+    (visit,) = rig.store.visits_started_between("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z")
+    assert rig.store.get_visit(visit["id"])["poop_walk"] is True
+    assert visit["poop_observed"] == "none"
+    assert visit["reason"] == "cocô no passeio"
+    assert st["last_poop"]["where"] == "walk"

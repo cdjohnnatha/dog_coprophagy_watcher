@@ -37,6 +37,8 @@ class PresenceTracker:
         self.clear_s = clear_s
         self._tz = tz
         self._person = 0
+        self._zone_person = 0  # `frigate/tray_area/person`
+        self._held: dict[str, datetime] = {}  # big person events in tray_area -> last message
         self._dog = 0
         self._visit_active = False
         self._clear_since: datetime | None = None
@@ -52,7 +54,24 @@ class PresenceTracker:
 
     def on_person(self, count: int, now: datetime) -> list[PresenceAction]:
         """`frigate/tray_area/person`."""
-        previous, self._person = self._person, max(count, 0)
+        self._zone_person = max(count, 0)
+        return self._persons_changed(now)
+
+    def on_person_event(self, event_id: str, active: bool, now: datetime) -> list[PresenceAction]:
+        """A real person's Frigate event that entered tray_area keeps them "there" until it ends.
+
+        Bent over the tray, the owner's box often leaves the zone: on 2026-11-18 12:14 the zone
+        count said 2 s of a 26 s cleanup, the presence was dropped as too short and the poop it
+        removed was never counted (ADR-0022).
+        """
+        if active:
+            self._held[event_id] = now
+        else:
+            self._held.pop(event_id, None)
+        return self._persons_changed(now)
+
+    def _persons_changed(self, now: datetime) -> list[PresenceAction]:
+        previous, self._person = self._person, max(self._zone_person, len(self._held))
         if self._person == 0 and previous > 0 and self._started is not None:
             self._last_person = now  # counts are only published on change: this is when they left
         if self._person > 0:
@@ -74,7 +93,8 @@ class PresenceTracker:
         """Frigate went away or came back: the cached counts are stale, so forget them."""
         if self._person > 0 and self._started is not None:
             self._last_person = now
-        self._person = self._dog = 0
+        self._person = self._zone_person = self._dog = 0
+        self._held.clear()
         self._clear_since = None
 
     def set_visit_active(self, active: bool, now: datetime) -> list[PresenceAction]:
@@ -85,6 +105,11 @@ class PresenceTracker:
         return []
 
     def tick(self, now: datetime) -> list[PresenceAction]:
+        stale = [e for e, at in self._held.items() if (now - at).total_seconds() > self.max_wait_s]
+        if stale:  # an "end" message lost: never keep a presence open on it
+            for event_id in stale:
+                del self._held[event_id]
+            self._persons_changed(now)
         if self._clear_since is None and self._person == 0 and self._dog == 0:
             self._clear_since = now
         if self._started is None:

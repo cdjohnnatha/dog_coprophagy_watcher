@@ -43,7 +43,7 @@ class AnalysisResult(BaseModel):
 
 
 class PadChangeResult(BaseModel):
-    """Answer for one person presence at the tray (prompt pad_change_v1)."""
+    """Answer for one person presence at the tray (prompt pad_change_v2)."""
 
     model_config = ConfigDict(extra="forbid")
 

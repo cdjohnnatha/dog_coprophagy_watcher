@@ -148,6 +148,18 @@ MIGRATIONS: list[str] = [
     ALTER TABLE visits ADD COLUMN found_by TEXT;
     ALTER TABLE visits ADD COLUMN found_from TEXT;
     """,
+    # 9: a poop the owner saw on a walk (manual, ADR-0021): counted like any other, never at home
+    """
+    ALTER TABLE visits ADD COLUMN poop_walk INTEGER NOT NULL DEFAULT 0;
+    """,
+    # 10: the owner answered in doubt (2026-11-20): which photos were bad and why. Doubtful
+    # answers stay out of the accuracy and are reviewed apart
+    """
+    ALTER TABLE labels ADD COLUMN doubt_photos TEXT
+        CHECK (doubt_photos IN ('before', 'after', 'both', 'none'));
+    ALTER TABLE labels ADD COLUMN doubt_reason TEXT
+        CHECK (doubt_reason IN ('glare', 'old_stain', 'other'));
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -176,6 +188,7 @@ _VISIT_COLUMNS = (
     "pee_where",
     "found_by",
     "found_from",
+    "poop_walk",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -192,7 +205,13 @@ _PRESENCE_COLUMNS = (
     "promotion_pending",
 )
 _PAD_CHANGE_COLUMNS = ("id", "at", "source", "presence_id", "visit_id", "pad_color", "undone_at")
-_BOOL_FIELDS = ("person_present", "needs_review", "poop_removed", "promotion_pending")
+_BOOL_FIELDS = (
+    "person_present",
+    "needs_review",
+    "poop_removed",
+    "promotion_pending",
+    "poop_walk",
+)
 _JSON_FIELDS = ("frigate_event_ids", "analysis", "cost_units")
 
 
@@ -206,7 +225,7 @@ def _encode(field: str, value: Any) -> Any:
 
 def _visit_from_row(row: sqlite3.Row) -> dict:
     visit = dict(row)
-    for field in ("person_present", "needs_review"):
+    for field in ("person_present", "needs_review", "poop_walk"):
         if visit[field] is not None:
             visit[field] = bool(visit[field])
     if visit["frigate_event_ids"] is not None:
@@ -315,8 +334,9 @@ class Store:
         return self._visits("state = 'ANALYSING'")
 
     def review_queue(self, limit: int = 20) -> list[dict]:
-        """Visits flagged for review, newest first."""
-        sql = f"SELECT * FROM visits WHERE {_NEEDS_REVIEW} ORDER BY started_at DESC LIMIT ?"
+        """Visits flagged for review, oldest first: the owner compares them in the order they
+        happened, so the head is the earliest pending visit (owner, 2026-11-19)."""
+        sql = f"SELECT * FROM visits WHERE {_NEEDS_REVIEW} ORDER BY started_at ASC, id ASC LIMIT ?"
         return [_visit_from_row(r) for r in self._db.execute(sql, (limit,))]
 
     def review_count(self) -> int:
@@ -405,9 +425,27 @@ class Store:
         rows = self._db.execute("SELECT * FROM presences WHERE state IN ('PRESENT', 'ANALYSING')")
         return [self._decoded(r) for r in rows]
 
+    def last_presence(self, since_iso: str) -> dict | None:
+        """The newest finished presence that started after `since_iso` (a person at the tray)."""
+        row = self._db.execute(
+            "SELECT * FROM presences WHERE started_at > ? AND ended_at IS NOT NULL"
+            " AND state = 'DECIDED' ORDER BY started_at DESC LIMIT 1",
+            (since_iso,),
+        ).fetchone()
+        return self._decoded(row)
+
     def pending_promotions(self) -> list[dict]:
         rows = self._db.execute("SELECT * FROM presences WHERE promotion_pending = 1")
         return [self._decoded(r) for r in rows]
+
+    def presences_between(self, start_iso: str, end_iso: str) -> list[dict]:
+        """Finished presences (a person at the tray) started in [start, end), oldest first."""
+        rows = self._db.execute(
+            "SELECT * FROM presences WHERE started_at >= ? AND started_at < ?"
+            " AND ended_at IS NOT NULL ORDER BY started_at",
+            (start_iso, end_iso),
+        )
+        return [dict(r) for r in rows]
 
     def insert_pad_change(self, change: dict) -> None:
         self._insert("pad_changes", _PAD_CHANGE_COLUMNS, change)
@@ -473,13 +511,17 @@ class Store:
         by: str | None = None,
         previous_final_outcome: str | None = None,
         kind: str = "pee",
+        doubt: dict | None = None,
     ) -> int:
+        doubt = doubt or {}
         with self._db:
             cur = self._db.execute(
                 "INSERT INTO labels (visit_id, label, channel, labelled_by,"
-                " previous_final_outcome, kind) VALUES (?, ?, ?, ?, ?, ?)",
-                (visit_id, label, channel, by, previous_final_outcome, kind),
-            )
+                " previous_final_outcome, kind, doubt_photos, doubt_reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (visit_id, label, channel, by, previous_final_outcome, kind,
+                 doubt.get("photos"), doubt.get("reason")),
+            )  # fmt: skip
         return int(cur.lastrowid)
 
     def labels_for(self, visit_id: str, kind: str = "pee") -> list[dict]:
@@ -502,7 +544,8 @@ class Store:
 
     def analysis_label_pairs(self, since_iso: str) -> list[dict]:
         """One row per (labelled visit, analyser): the analyser's latest outcome and the owner's
-        latest label. Labelled visits without any analysis (manual entries) have analyser None."""
+        latest label. Labelled visits without any analysis (manual entries) have analyser None.
+        A label given in doubt is not ground truth: such visits are left out."""
         rows = self._db.execute(
             "SELECT v.id AS visit_id, v.source, v.auto_outcome, l.label,"
             " a.analyser, a.role, a.outcome"
@@ -513,7 +556,7 @@ class Store:
             "  AND a.error IS NULL"
             "  AND a.id = (SELECT MAX(id) FROM analyses WHERE visit_id = v.id"
             "              AND analyser = a.analyser AND error IS NULL)"
-            " WHERE v.started_at >= ? ORDER BY v.started_at",
+            " WHERE v.started_at >= ? AND l.doubt_reason IS NULL ORDER BY v.started_at",
             (since_iso,),
         )
         return [dict(r) for r in rows]

@@ -87,3 +87,36 @@ def test_presence_ids_are_unique_in_the_same_second(tracker, clock):
     tracker.set_visit_active(False, clock())
     second = tracker.on_person(0, clock()) or tracker.on_person(1, clock())
     assert second[0].presence["id"] != first
+
+
+# --- ADR-0022: a real person's event that entered tray_area keeps the presence going ---
+
+
+def test_a_cleanup_mostly_outside_the_zone_is_captured_while_the_event_lasts(tracker, clock):
+    """2026-11-18 12:14: zone count 2 s, the person event 18 s; the cleanup must be analysed."""
+    tracker.tick(clock())
+    tracker.on_person_event("e1", True, clock())
+    tracker.on_person(1, clock())
+    clock.advance(2)
+    tracker.on_person(0, clock())  # bent over the tray: the box left the zone
+    assert run(tracker, clock, 16) == []
+    tracker.on_person_event("e1", False, clock())  # the event ends: they left
+    (capture,) = run(tracker, clock, 31)
+    assert capture.kind == "capture"
+    assert capture.presence["ended_at"] == "2026-10-29T12:00:18Z"
+
+
+def test_an_event_with_a_lost_end_does_not_keep_the_presence_open(tracker, clock):
+    tracker.tick(clock())
+    tracker.on_person_event("e1", True, clock())
+    tracker.on_person(1, clock())
+    clock.advance(20)
+    tracker.on_person(0, clock())
+    actions = run(tracker, clock, 700)
+    assert "capture" in kinds(actions) and not tracker.present
+
+
+def test_the_end_of_an_unknown_event_changes_nothing(tracker, clock):
+    tracker.tick(clock())
+    assert tracker.on_person_event("other", False, clock()) == []
+    assert not tracker.present

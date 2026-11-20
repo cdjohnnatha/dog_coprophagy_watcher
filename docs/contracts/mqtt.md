@@ -25,6 +25,7 @@ Broker: `core-mosquitto`. Credentials come from the Supervisor MQTT service (res
 | `ellie/pad/full` | no | `{visit_id, at, pees_since, image, reason}` when a counted pee was outside the pad (`pee_where` `off_pad` or `both`, prompt pee_v4, ADR-0017), once per visit. HA notifies "Ellie: tapete cheio" (tag `ellie_pad_full`, cleared by the next `ellie/pad/changed`) |
 | `ellie/alert` | no | `{kind: "credit_exhausted"|"gemini_key", title, message}`. Problems only the owner can fix (Gemini credit ran out on HTTP 402, key refused on 401/403). The app sends at most one per kind every 6 h; HA turns it into a phone + persistent notification |
 | `ellie/image/last_pee`, `ellie/image/review_before`, `ellie/image/review_after` | yes | Raw JPEG bytes for the three `image` entities, sent only when the photo changes (last counted pee; before/after of the newest visit in the review queue) |
+| `ellie/image/review_{before,after}_{pad,enh,yellow}` | yes | Raw JPEG bytes of the six pad close-ups of the review-queue head (ADR-0023), written to the visit folder as `<frame>_<kind>.jpg` and sent once per head change; placeholder when a view does not exist |
 | `ellie/image/poop` | yes | Raw JPEG for `image.ellie_poop_photo`: the `after.jpg` of the poop that is present now, else of the last counted poop |
 | `homeassistant/<component>/ellie/<object_id>/config` | yes | MQTT discovery configs |
 
@@ -37,11 +38,11 @@ All payloads are JSON. Invalid payloads are logged and ignored (never crash).
 | `ellie/cmd/label` | `{visit_id, kind?: "pee"|"poop", label: "pee"|"no_pee"|"poop"|"no_poop", channel, by?}` | Adds a Label (data-model). `kind` defaults to `pee`; `pee`/`no_pee` need kind `pee`, `poop`/`no_poop` need kind `poop` (anything else is ignored). A poop answer never changes the pee outcome and the other way round. `no_poop` also clears a poop that is present. Publishes `ellie/review/resolved` |
 | `ellie/cmd/poop_clear` | `{visit_id?, by?}` | "Limpei": clears the poop of that visit, or every poop that is present when `visit_id` is missing (`poop_cleared_by = owner`). It stays counted |
 | `ellie/cmd/manual_pee` | `{at: ISO-8601 local, by?}` | Creates a `source=manual` visit with `final_outcome=pee` |
-| `ellie/cmd/manual_poop` | `{at: ISO-8601 local, where?: on_pad\|beside_tray, by?}` | Creates a `source=manual` visit with `final_poop=poop` (counted for its day, already cleared so it is never "present"), `final_outcome=no_pee`, and says nothing about the pee. Same time rules as `manual_pee` |
+| `ellie/cmd/manual_poop` | `{at: ISO-8601 local, where?: on_pad\|beside_tray\|walk, by?}` | Creates a `source=manual` visit (`walk`: `poop_walk=1`, reason "cocô no passeio", ADR-0021) with `final_poop=poop` (counted for its day, already cleared so it is never "present"), `final_outcome=no_pee`, and says nothing about the pee. Same time rules as `manual_pee` |
 | `ellie/cmd/reject_last` | `{by?}` | Labels the most recent counted pee (today) as `no_pee` |
 | `ellie/cmd/reanalyse` | `{visit_id, analyser?}` | Re-runs an analyser (default: the deciding one; or e.g. `gemini:pee_v2`) on stored frames and keeps the answer as a shadow analysis. Logged as `reanalyse <id> with <analyser>: <outcome>` |
 | `ellie/cmd/pad_label` | `{presence_id, label: "replaced"|"not_replaced", by?}` | Resolves an uncertain presence. `replaced` creates a Pad change (`source=confirmed`). Publishes `ellie/review/resolved` |
-| `ellie/cmd/pad_changed` | `{at?: ISO-8601 local, by?}` | Pad change `source=manual` (default `at` = now) |
+| `ellie/cmd/pad_changed` | `{at?: ISO-8601 local, last_presence?: true, by?}` | Pad change `source=manual` (default `at` = now). `last_presence`: at the end of the last presence after the current change (12 h max); a presence still waiting for an answer is answered "replaced" instead (ADR-0021) |
 | `ellie/cmd/pad_undo` | `{by?}` | Sets `undone_at` on the current pad change; the previous one becomes current |
 | `ellie/set/<setting>` | value | `confidence_threshold` (0.5–0.99), `merge_gap_s` (15–300), `deciding_analyser` (id), `validation_mode` (`ON`/`OFF`), `pad_change_days` (1–7) |
 
