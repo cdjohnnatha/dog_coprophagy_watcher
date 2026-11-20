@@ -1,17 +1,17 @@
 # Lint and tests on every pull request and push to main (owner rule 2026-11-20: merge only when green).
 # Tuned for speed (2026-11-20): lint and tests run as two parallel jobs, uv installs the dependencies
 # from its cache, pytest runs on all cores (pytest-xdist), a new push cancels the older run of the
-# same branch, and docs-only changes skip the run. Actions are pinned to commit SHAs (supply chain).
+# same branch. Actions are pinned to commit SHAs (supply chain). No paths-ignore: "tests" is a
+# required check of the main ruleset, and a run skipped by a path filter never reports, which would
+# leave a docs-only PR waiting forever (2026-11-20).
 # The contract tests (tests/qa_contract) read the Home Assistant config repo, which is not checked
 # out here: they are not collected in CI and run on the Pi (about 1 s).
 name: tests
 
 on:
   pull_request:
-    paths-ignore: ["**.md", "docs/**"]
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**"]
 
 permissions:
   contents: read
