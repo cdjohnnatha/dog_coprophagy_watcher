@@ -74,7 +74,7 @@
     },
     "pad_stains": {
       "type": "integer",
-      "description": "Separate pee stains on the pad in AFTER, old and new (prompt pee_v5, ADR-0020 census; the app clamps it to 0-30). Stains that touch count as one, so it is a lower bound of the pees on the pad. Optional: older prompts leave it out."
+      "description": "Separate pee stains on the pad in AFTER, old and new (prompts pee_v5 and pee_v6, ADR-0020 census; the app clamps it to 0-30). Stains that touch count as one, so it is a lower bound of the pees on the pad. Optional: older prompts leave it out."
     }
   }
 }
