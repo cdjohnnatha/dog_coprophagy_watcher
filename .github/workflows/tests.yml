@@ -1,28 +1,49 @@
 # Lint and tests on every pull request and push to main (owner rule 2026-11-20: merge only when green).
-# The contract tests (tests/qa_contract) read the Home Assistant config repo, which is not checked out
-# here: they are skipped in CI and run on the Pi (about 1 s).
+# Tuned for speed (2026-11-20): lint and tests run as two parallel jobs, uv installs the dependencies
+# from its cache, pytest runs on all cores (pytest-xdist), a new push cancels the older run of the
+# same branch, and docs-only changes skip the run. Actions are pinned to commit SHAs (supply chain).
+# The contract tests (tests/qa_contract) read the Home Assistant config repo, which is not checked
+# out here: they are not collected in CI and run on the Pi (about 1 s).
 name: tests
 
 on:
   pull_request:
+    paths-ignore: ["**.md", "docs/**"]
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
+        with:
+          version-file: pyproject.toml  # same ruff as the dev dependencies
+          args: check src tests
+      - run: ruff format --check src tests
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           python-version: "3.13"  # same as the app image (Dockerfile: python:3.13-slim-bookworm)
-          cache: pip
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
       - name: Install
-        run: python -m pip install -e ".[dev]"
-      - name: Ruff
-        run: |
-          ruff check src tests
-          ruff format --check src tests
+        run: uv pip install -e ".[dev]"
       - name: Pytest
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto
