@@ -96,6 +96,22 @@ FIXABLE = {
 }
 
 
+DOUBT_PHOTOS = ("before", "after", "both", "none")
+DOUBT_REASONS = ("glare", "old_stain", "other")
+
+
+def _doubt(data: dict) -> dict | None:
+    """`doubt: {photos, reason}` of a label command (owner answered unsure), else None."""
+    doubt = data.get("doubt")
+    if not isinstance(doubt, dict):
+        return None
+    photos, reason = doubt.get("photos") or "none", doubt.get("reason") or "other"
+    if photos not in DOUBT_PHOTOS or reason not in DOUBT_REASONS:
+        log.warning("label: ignored an invalid doubt %r", doubt)
+        return None
+    return {"photos": photos, "reason": reason}
+
+
 def _placeholder_jpeg() -> bytes:
     """A flat grey picture for "no photo for this pee" (manual entry, nothing counted yet)."""
     import io
@@ -339,7 +355,7 @@ class Service(PadsMixin):
         if kind == "poop":  # a poop answer never touches the pee outcome (ADR-0014)
             await self._apply_poop_label(visit, label, channel, self._by(data))
         else:
-            await self._apply_label(visit, label, channel, self._by(data))
+            await self._apply_label(visit, label, channel, self._by(data), _doubt(data))
 
     def _manual_time(self, command: str, data: dict) -> datetime | None:
         """The time of a manual entry (local if it has no zone); None, with a log, if unusable."""
@@ -600,12 +616,17 @@ class Service(PadsMixin):
         else:  # already decided or labelled: record the new answer, change nothing else
             self._spawn(self._rerun(visit["id"], data.get("analyser")))
 
-    async def _apply_label(self, visit: dict, label: str, channel: str, by: str | None) -> None:
+    async def _apply_label(
+        self, visit: dict, label: str, channel: str, by: str | None, doubt: dict | None = None
+    ) -> None:
         visit_id = visit["id"]
         if visit["state"] not in ("DECIDED", "LABELLED"):
             log.warning("label for %s ignored: the visit is still %s", visit_id, visit["state"])
             return
-        self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"])
+        self.store.insert_label(visit_id, label, channel, by, visit["final_outcome"], doubt=doubt)
+        if doubt:
+            log.info("visit %s: answered %s in doubt (photos %s, %s)", visit_id, label,
+                     doubt["photos"], doubt["reason"])  # fmt: skip
         self.store.update_visit(visit_id, final_outcome=label, needs_review=False, state="LABELLED")
         if label == "pee" and visit["final_outcome"] != "pee" and not is_found_pee(visit):
             await self._absorb_found_pee(visit)
@@ -613,7 +634,7 @@ class Service(PadsMixin):
         analyses = self.store.analyses_for(visit_id)
         night = ((analyses[-1]["result"] or {}).get("night_mode")) if analyses else None
         try:
-            self.evidence.export_dataset(visit, label, night=night)
+            self.evidence.export_dataset(visit, label, night=night, doubt=doubt)
         except OSError:
             log.exception("dataset export failed for %s", visit_id)
         await self._publish("ellie/review/resolved", json.dumps({"visit_id": visit_id}), False)

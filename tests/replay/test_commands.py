@@ -60,6 +60,29 @@ async def test_labelling_an_uncertain_visit_counts_it_and_feeds_the_dataset(rig)
     ]
     line = json.loads((root / "labels.jsonl").read_text().splitlines()[-1])
     assert line["visit_id"] == visit_id and line["label"] == "pee"
+    assert "doubt" not in line
+
+
+async def test_an_answer_in_doubt_is_kept_with_its_reason_and_left_out_of_the_accuracy(rig):
+    """Owner, 2026-11-20: mark which photos were bad and why, answer anyway."""
+    visit_id = await uncertain_visit(rig)
+    await command(rig, "label", visit_id=visit_id, label="no_pee", channel="dashboard",
+                  doubt={"photos": "after", "reason": "glare"})  # fmt: skip
+    visit = rig.store.get_visit(visit_id)
+    assert visit["final_outcome"] == "no_pee" and visit["state"] == "LABELLED"
+    (label,) = rig.store.labels_for(visit_id)
+    assert (label["doubt_photos"], label["doubt_reason"]) == ("after", "glare")
+    line = json.loads((rig.evidence.root / "dataset" / "labels.jsonl").read_text().splitlines()[-1])
+    assert line["doubt"] == {"photos": "after", "reason": "glare"}
+    assert rig.store.analysis_label_pairs("2026") == []  # not ground truth
+
+
+async def test_an_invalid_doubt_still_labels_without_it(rig):
+    visit_id = await uncertain_visit(rig)
+    await command(rig, "label", visit_id=visit_id, label="pee", channel="dashboard",
+                  doubt={"photos": "sideways", "reason": "glare"})  # fmt: skip
+    (label,) = rig.store.labels_for(visit_id)
+    assert label["label"] == "pee" and label["doubt_reason"] is None
 
 
 async def test_relabelling_moves_the_example_and_the_latest_label_wins(rig):

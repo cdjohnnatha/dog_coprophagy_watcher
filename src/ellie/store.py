@@ -152,6 +152,14 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE visits ADD COLUMN poop_walk INTEGER NOT NULL DEFAULT 0;
     """,
+    # 10: the owner answered in doubt (2026-11-20): which photos were bad and why. Doubtful
+    # answers stay out of the accuracy and are reviewed apart
+    """
+    ALTER TABLE labels ADD COLUMN doubt_photos TEXT
+        CHECK (doubt_photos IN ('before', 'after', 'both', 'none'));
+    ALTER TABLE labels ADD COLUMN doubt_reason TEXT
+        CHECK (doubt_reason IN ('glare', 'old_stain', 'other'));
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -503,13 +511,17 @@ class Store:
         by: str | None = None,
         previous_final_outcome: str | None = None,
         kind: str = "pee",
+        doubt: dict | None = None,
     ) -> int:
+        doubt = doubt or {}
         with self._db:
             cur = self._db.execute(
                 "INSERT INTO labels (visit_id, label, channel, labelled_by,"
-                " previous_final_outcome, kind) VALUES (?, ?, ?, ?, ?, ?)",
-                (visit_id, label, channel, by, previous_final_outcome, kind),
-            )
+                " previous_final_outcome, kind, doubt_photos, doubt_reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (visit_id, label, channel, by, previous_final_outcome, kind,
+                 doubt.get("photos"), doubt.get("reason")),
+            )  # fmt: skip
         return int(cur.lastrowid)
 
     def labels_for(self, visit_id: str, kind: str = "pee") -> list[dict]:
@@ -532,7 +544,8 @@ class Store:
 
     def analysis_label_pairs(self, since_iso: str) -> list[dict]:
         """One row per (labelled visit, analyser): the analyser's latest outcome and the owner's
-        latest label. Labelled visits without any analysis (manual entries) have analyser None."""
+        latest label. Labelled visits without any analysis (manual entries) have analyser None.
+        A label given in doubt is not ground truth: such visits are left out."""
         rows = self._db.execute(
             "SELECT v.id AS visit_id, v.source, v.auto_outcome, l.label,"
             " a.analyser, a.role, a.outcome"
@@ -543,7 +556,7 @@ class Store:
             "  AND a.error IS NULL"
             "  AND a.id = (SELECT MAX(id) FROM analyses WHERE visit_id = v.id"
             "              AND analyser = a.analyser AND error IS NULL)"
-            " WHERE v.started_at >= ? ORDER BY v.started_at",
+            " WHERE v.started_at >= ? AND l.doubt_reason IS NULL ORDER BY v.started_at",
             (since_iso,),
         )
         return [dict(r) for r in rows]

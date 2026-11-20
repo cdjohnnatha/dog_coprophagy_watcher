@@ -26,7 +26,7 @@ def visit(vid="v_20260101_100000", **over):
 
 
 def test_migration_creates_tables(store):
-    assert store.schema_version() == len(MIGRATIONS) == 9
+    assert store.schema_version() == len(MIGRATIONS) == 10
     names = {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"visits", "analyses", "settings"} <= names
 
@@ -35,7 +35,7 @@ def test_migration_twice_is_noop(tmp_path):
     path = str(tmp_path / "x.db")
     Store(path).close()
     s = Store(path)
-    assert s.schema_version() == 9
+    assert s.schema_version() == 10
     s.close()
 
 
@@ -169,7 +169,7 @@ def test_migration_6_backfills_old_visits_and_keeps_old_labels(tmp_path) -> None
     db.close()
 
     store = Store(path)
-    assert store.schema_version() == 9
+    assert store.schema_version() == 10
     got = {v["id"]: v for v in store.visits_started_between("2026", "2027")}
     assert (got["a"]["auto_poop"], got["a"]["final_poop"]) == ("poop", "poop")
     assert got["a"]["poop_cleared_by"] == "migration" and store.open_poops() == []

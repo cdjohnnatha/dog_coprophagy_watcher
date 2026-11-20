@@ -69,7 +69,10 @@ def _stretch_pair(a: Image.Image, b: Image.Image) -> tuple[Image.Image, Image.Im
             break
     scale = 255 / max(hi - lo, 1)
     lut = [max(0, min(255, int((i - lo) * scale))) for i in range(256)] * 3
-    return tuple(ImageEnhance.Color(x.point(lut)).enhance(1.5) for x in (_white_balance(a), _white_balance(b)))
+    return tuple(
+        ImageEnhance.Color(x.point(lut)).enhance(1.5)
+        for x in (_white_balance(a), _white_balance(b))
+    )
 
 
 def _yellow(im: Image.Image) -> Image.Image:
@@ -82,14 +85,19 @@ def _yellow_maps(a: Image.Image, b: Image.Image) -> tuple[Image.Image, Image.Ima
     hi = max(ya.getextrema()[1], yb.getextrema()[1])
     scale = 255 / max(hi - lo, 1)
     lut = [max(0, min(255, int((i - lo) * scale))) for i in range(256)]
-    paint = lambda y: ImageOps.colorize(y.point(lut), black="#101040", mid="#7a7a7a", white="#ffd000")  # noqa: E731
+    paint = lambda y: ImageOps.colorize(
+        y.point(lut), black="#101040", mid="#7a7a7a", white="#ffd000"
+    )
     grown = ImageChops.subtract(yb, ya).point(lambda v: 255 if v >= YELLOW_GROWTH else 0)
     grown = grown.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(5))  # drop specks
     return paint(ya), paint(yb), grown
 
 
 def _grey_change(a: Image.Image, b: Image.Image) -> tuple[Image.Image, Image.Image, Image.Image]:
-    ga, gb = ImageOps.autocontrast(a.convert("L"), cutoff=1), ImageOps.autocontrast(b.convert("L"), cutoff=1)
+    ga, gb = (
+        ImageOps.autocontrast(a.convert("L"), cutoff=1),
+        ImageOps.autocontrast(b.convert("L"), cutoff=1),
+    )
     darker = ImageChops.subtract(ga, gb).filter(ImageFilter.GaussianBlur(3))
     grown = darker.point(lambda v: 255 if v >= 30 else 0)
     grown = grown.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(5))
@@ -119,7 +127,9 @@ def grid(visit: Path) -> Image.Image:
     for i, t in enumerate((ea, eb, ma, mb)):
         g.paste(t, ((i % 2) * (TILE + 8), 24 + (i // 2) * (h + 8)))
     ImageDraw.Draw(g).text(
-        (4, 6), f"{visit.name}   ANTES | DEPOIS   embaixo: {bottom}, vermelho = aumentou ({share:.1%})", fill="black"
+        (4, 6),
+        f"{visit.name}   ANTES | DEPOIS   embaixo: {bottom}, vermelho = aumentou ({share:.1%})",
+        fill="black",
     )
     return g
 
